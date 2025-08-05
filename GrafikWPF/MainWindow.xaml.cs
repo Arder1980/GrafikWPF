@@ -29,6 +29,9 @@ namespace GrafikWPF
     {
         private record PreparedData(DataTable DataTable, Dictionary<string, int> Limity, List<Lekarz> LekarzeAktywni, RozwiazanyGrafik? ZapisanyGrafik);
 
+        private const int MAKS_KOLUMN_LEKARZY = 20;
+        private readonly List<DataGridTemplateColumn> _doctorColumns = new();
+
         private Dictionary<string, int> _limityDyzurow = new();
         private readonly Dictionary<string, TypDostepnosci> _mapaNazwDostepnosci;
         private readonly Dictionary<TypDostepnosci, string> _mapaDostepnosciDoNazw;
@@ -77,6 +80,8 @@ namespace GrafikWPF
             {
                 "---", "Mogę", "Chcę", "Bardzo chcę", "Mogę warunkowo", "Dyżur (inny)", "Urlop"
             };
+
+            InicjalizujStaleKolumnySiatki();
 
             GrafikGrid.LoadingRow += DataGrid_LoadingRow_Styling;
             this.Loaded += Window_Loaded;
@@ -129,7 +134,8 @@ namespace GrafikWPF
                 int miesiac = MonthComboBox.SelectedIndex + 1;
 
                 UpdatePriorityInfo();
-                await AktualizujCaloscInterfejsuAsync(await WygenerujDaneWtle(rok, miesiac));
+                var preparedData = await WygenerujDaneWtle(rok, miesiac);
+                await AktualizujCaloscInterfejsuAsync(preparedData);
             }
             finally
             {
@@ -145,7 +151,12 @@ namespace GrafikWPF
             _grafikDataTable = preparedData.DataTable;
             _grafikZostalWygenerowany = preparedData.ZapisanyGrafik != null;
 
-            await AktualizujGridAsync(preparedData.LekarzeAktywni);
+            await Task.Run(() =>
+            {
+                Dispatcher.Invoke(() => AktualizujWidokSiatki(preparedData.LekarzeAktywni));
+            });
+
+            GrafikGrid.ItemsSource = _grafikDataTable.DefaultView;
 
             WygenerujNaglowkiElementow(preparedData.LekarzeAktywni);
             WygenerujNaglowekGrupowy(preparedData.LekarzeAktywni);
@@ -169,28 +180,25 @@ namespace GrafikWPF
                 DataManager.AppData.DaneGrafikow[_aktualnyKluczMiesiaca] = new DaneMiesiaca();
             }
             var daneMiesiaca = DataManager.AppData.DaneGrafikow[_aktualnyKluczMiesiaca];
-
             daneMiesiaca.LimityDyzurow = new Dictionary<string, int>(_limityDyzurow);
 
             var dostepnosc = new Dictionary<DateTime, Dictionary<string, TypDostepnosci>>();
             await Task.Run(() =>
             {
                 if (_grafikDataTable == null) return;
+                var lekarzeAktywni = DataManager.AppData.WszyscyLekarze.Where(l => l.IsAktywny).OrderBy(l => l.Nazwisko).ThenBy(l => l.Imie).ToList();
+
                 foreach (DataRow row in _grafikDataTable.Rows)
                 {
                     var data = (DateTime)row["FullDate"];
                     var wpisyDnia = new Dictionary<string, TypDostepnosci>();
-                    foreach (var lekarz in DataManager.AppData.WszyscyLekarze)
+
+                    for (int i = 0; i < lekarzeAktywni.Count; i++)
                     {
-                        if (_grafikDataTable.Columns.Contains(lekarz.Symbol))
-                        {
-                            _mapaNazwDostepnosci.TryGetValue(row[lekarz.Symbol].ToString() ?? "---", out var typ);
-                            wpisyDnia[lekarz.Symbol] = typ;
-                        }
-                        else
-                        {
-                            wpisyDnia[lekarz.Symbol] = TypDostepnosci.Niedostepny;
-                        }
+                        var lekarz = lekarzeAktywni[i];
+                        string nazwaKolumny = $"Lekarz_{i}";
+                        _mapaNazwDostepnosci.TryGetValue(row[nazwaKolumny].ToString() ?? "---", out var typ);
+                        wpisyDnia[lekarz.Symbol] = typ;
                     }
                     dostepnosc[data] = wpisyDnia;
                 }
@@ -224,16 +232,24 @@ namespace GrafikWPF
             });
         }
 
-        private DataTable PrzygotujSiatkeDanychNowyMiesiac(int rok, int miesiac, List<Lekarz> lekarzeAktywni)
+        private DataTable StworzPustaSiatkeDanych()
         {
             var dt = new DataTable();
             dt.Columns.Add("FullDate", typeof(DateTime));
             dt.Columns.Add("Data", typeof(string));
-            foreach (var symbol in lekarzeAktywni.Select(l => l.Symbol)) dt.Columns.Add(symbol, typeof(string));
+            for (int i = 0; i < MAKS_KOLUMN_LEKARZY; i++)
+            {
+                dt.Columns.Add($"Lekarz_{i}", typeof(string));
+            }
             dt.Columns.Add("Data_Powtorzona", typeof(string));
             dt.Columns.Add("Wynik", typeof(string));
             dt.Columns.Add("WynikLekarz", typeof(Lekarz));
+            return dt;
+        }
 
+        private DataTable PrzygotujSiatkeDanychNowyMiesiac(int rok, int miesiac, List<Lekarz> lekarzeAktywni)
+        {
+            var dt = StworzPustaSiatkeDanych();
             int dniWMiesiacu = DateTime.DaysInMonth(rok, miesiac);
             for (int dzien = 1; dzien <= dniWMiesiacu; dzien++)
             {
@@ -241,7 +257,10 @@ namespace GrafikWPF
                 var row = dt.NewRow();
                 row["FullDate"] = data;
                 row["Data"] = data.ToString("dd.MM (dddd)", new CultureInfo("pl-PL"));
-                foreach (var symbol in lekarzeAktywni.Select(l => l.Symbol)) row[symbol] = "---";
+                for (int i = 0; i < lekarzeAktywni.Count; i++)
+                {
+                    row[$"Lekarz_{i}"] = "---";
+                }
                 row["Data_Powtorzona"] = row["Data"];
                 row["WynikLekarz"] = DBNull.Value;
                 dt.Rows.Add(row);
@@ -251,14 +270,7 @@ namespace GrafikWPF
 
         private DataTable PrzygotujSiatkeDanychZBiezacychDanych(int rok, int miesiac, List<Lekarz> lekarzeAktywni, DaneMiesiaca daneMiesiaca)
         {
-            var dt = new DataTable();
-            dt.Columns.Add("FullDate", typeof(DateTime));
-            dt.Columns.Add("Data", typeof(string));
-            foreach (var symbol in lekarzeAktywni.Select(l => l.Symbol)) dt.Columns.Add(symbol, typeof(string));
-            dt.Columns.Add("Data_Powtorzona", typeof(string));
-            dt.Columns.Add("Wynik", typeof(string));
-            dt.Columns.Add("WynikLekarz", typeof(Lekarz));
-
+            var dt = StworzPustaSiatkeDanych();
             int dniWMiesiacu = DateTime.DaysInMonth(rok, miesiac);
             for (int dzien = 1; dzien <= dniWMiesiacu; dzien++)
             {
@@ -269,21 +281,25 @@ namespace GrafikWPF
 
                 if (daneMiesiaca.Dostepnosc != null && daneMiesiaca.Dostepnosc.TryGetValue(data, out var dostepnosciDnia))
                 {
-                    foreach (var lekarz in lekarzeAktywni)
+                    for (int i = 0; i < lekarzeAktywni.Count; i++)
                     {
+                        var lekarz = lekarzeAktywni[i];
                         if (dostepnosciDnia.TryGetValue(lekarz.Symbol, out var typ))
                         {
-                            row[lekarz.Symbol] = _mapaDostepnosciDoNazw.GetValueOrDefault(typ, "---");
+                            row[$"Lekarz_{i}"] = _mapaDostepnosciDoNazw.GetValueOrDefault(typ, "---");
                         }
                         else
                         {
-                            row[lekarz.Symbol] = "---";
+                            row[$"Lekarz_{i}"] = "---";
                         }
                     }
                 }
                 else
                 {
-                    foreach (var symbol in lekarzeAktywni.Select(l => l.Symbol)) row[symbol] = "---";
+                    for (int i = 0; i < lekarzeAktywni.Count; i++)
+                    {
+                        row[$"Lekarz_{i}"] = "---";
+                    }
                 }
 
                 row["Data_Powtorzona"] = row["Data"];
@@ -293,15 +309,13 @@ namespace GrafikWPF
             return dt;
         }
 
-        private async Task AktualizujGridAsync(List<Lekarz> lekarzeAktywni)
+        private void InicjalizujStaleKolumnySiatki()
         {
-            GrafikGrid.ItemsSource = null;
-            GrafikGrid.Columns.Clear();
             var singleClickStyle = (Style)this.TryFindResource("SingleClickEditingCellStyle");
             var staticStyle = (Style)this.TryFindResource("StaticColumnStyle");
             var centerTextStyle = (Style)this.TryFindResource("CenterVTextBlockStyle");
 
-            var dataColumn1 = new DataGridTextColumn
+            GrafikGrid.Columns.Add(new DataGridTextColumn
             {
                 Header = null,
                 Binding = new Binding("[Data]"),
@@ -309,46 +323,44 @@ namespace GrafikWPF
                 Width = new DataGridLength(1.5, DataGridLengthUnitType.Star),
                 CellStyle = staticStyle,
                 ElementStyle = centerTextStyle
-            };
-            GrafikGrid.Columns.Add(dataColumn1);
+            });
 
-            foreach (var lekarz in lekarzeAktywni)
+            for (int i = 0; i < MAKS_KOLUMN_LEKARZY; i++)
             {
-                await Dispatcher.InvokeAsync(() =>
+                var templateColumn = new DataGridTemplateColumn
                 {
-                    var templateColumn = new DataGridTemplateColumn
-                    {
-                        Header = null,
-                        Width = new DataGridLength(1, DataGridLengthUnitType.Star),
-                        CellStyle = singleClickStyle
-                    };
+                    Header = "X",
+                    Width = new DataGridLength(1, DataGridLengthUnitType.Star),
+                    CellStyle = singleClickStyle,
+                    Visibility = Visibility.Collapsed
+                };
 
-                    var textFactory = new FrameworkElementFactory(typeof(TextBlock));
-                    textFactory.SetValue(TextBlock.HorizontalAlignmentProperty, System.Windows.HorizontalAlignment.Center);
-                    textFactory.SetValue(TextBlock.VerticalAlignmentProperty, System.Windows.VerticalAlignment.Center);
-                    textFactory.SetBinding(TextBlock.TextProperty, new Binding($"[{lekarz.Symbol}]"));
-                    templateColumn.CellTemplate = new DataTemplate { VisualTree = textFactory };
+                var textFactory = new FrameworkElementFactory(typeof(TextBlock));
+                textFactory.SetValue(TextBlock.HorizontalAlignmentProperty, System.Windows.HorizontalAlignment.Center);
+                textFactory.SetValue(TextBlock.VerticalAlignmentProperty, System.Windows.VerticalAlignment.Center);
+                textFactory.SetBinding(TextBlock.TextProperty, new Binding($"[Lekarz_{i}]"));
+                templateColumn.CellTemplate = new DataTemplate { VisualTree = textFactory };
 
-                    var comboFactory = new FrameworkElementFactory(typeof(ComboBox));
-                    comboFactory.SetValue(ComboBox.HorizontalContentAlignmentProperty, System.Windows.HorizontalAlignment.Center);
-                    comboFactory.SetValue(ComboBox.VerticalContentAlignmentProperty, System.Windows.VerticalAlignment.Center);
-                    comboFactory.SetValue(ComboBox.IsDropDownOpenProperty, true);
-                    comboFactory.SetBinding(ItemsControl.ItemsSourceProperty, new Binding("DataContext.OpcjeDostepnosci")
-                    {
-                        RelativeSource = new RelativeSource(RelativeSourceMode.FindAncestor, typeof(Window), 1)
-                    });
-                    comboFactory.SetBinding(ComboBox.SelectedItemProperty, new Binding($"[{lekarz.Symbol}]")
-                    {
-                        Mode = BindingMode.TwoWay,
-                        UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged
-                    });
-                    templateColumn.CellEditingTemplate = new DataTemplate { VisualTree = comboFactory };
+                var comboFactory = new FrameworkElementFactory(typeof(ComboBox));
+                comboFactory.SetValue(ComboBox.HorizontalContentAlignmentProperty, System.Windows.HorizontalAlignment.Center);
+                comboFactory.SetValue(ComboBox.VerticalContentAlignmentProperty, System.Windows.VerticalAlignment.Center);
+                comboFactory.SetValue(ComboBox.IsDropDownOpenProperty, true);
+                comboFactory.SetBinding(ItemsControl.ItemsSourceProperty, new Binding("DataContext.OpcjeDostepnosci")
+                {
+                    RelativeSource = new RelativeSource(RelativeSourceMode.FindAncestor, typeof(Window), 1)
+                });
+                comboFactory.SetBinding(ComboBox.SelectedItemProperty, new Binding($"[Lekarz_{i}]")
+                {
+                    Mode = BindingMode.TwoWay,
+                    UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged
+                });
+                templateColumn.CellEditingTemplate = new DataTemplate { VisualTree = comboFactory };
 
-                    GrafikGrid.Columns.Add(templateColumn);
-                }, DispatcherPriority.Background);
+                _doctorColumns.Add(templateColumn);
+                GrafikGrid.Columns.Add(templateColumn);
             }
 
-            var dataColumn2 = new DataGridTextColumn()
+            GrafikGrid.Columns.Add(new DataGridTextColumn()
             {
                 Header = null,
                 Binding = new Binding("[Data_Powtorzona]"),
@@ -356,10 +368,9 @@ namespace GrafikWPF
                 Width = new DataGridLength(1.5, DataGridLengthUnitType.Star),
                 CellStyle = staticStyle,
                 ElementStyle = centerTextStyle
-            };
-            GrafikGrid.Columns.Add(dataColumn2);
+            });
 
-            var wynikColumn = new DataGridTextColumn()
+            GrafikGrid.Columns.Add(new DataGridTextColumn()
             {
                 Header = null,
                 Binding = new Binding("[Wynik]"),
@@ -367,10 +378,23 @@ namespace GrafikWPF
                 Width = new DataGridLength(1.5, DataGridLengthUnitType.Star),
                 CellStyle = staticStyle,
                 ElementStyle = centerTextStyle
-            };
-            GrafikGrid.Columns.Add(wynikColumn);
+            });
+        }
 
-            GrafikGrid.ItemsSource = _grafikDataTable.DefaultView;
+        private void AktualizujWidokSiatki(List<Lekarz> lekarzeAktywni)
+        {
+            for (int i = 0; i < MAKS_KOLUMN_LEKARZY; i++)
+            {
+                var column = _doctorColumns[i];
+                if (i < lekarzeAktywni.Count)
+                {
+                    column.Visibility = Visibility.Visible;
+                }
+                else
+                {
+                    column.Visibility = Visibility.Collapsed;
+                }
+            }
         }
 
         private void TableContainerGrid_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateLayoutAndText();

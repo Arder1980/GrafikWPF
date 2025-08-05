@@ -1,0 +1,59 @@
+﻿<Window x:Class="GrafikWPF.PrioritiesWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:GrafikWPF"
+        mc:Ignorable="d"
+        Title="Ustawienia Priorytetów Solver'a" 
+        SizeToContent="Height" Width="650"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        Background="LightGray">
+    <Grid Margin="15">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Zarządzanie Priorytetami Algorytmu" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center"/>
+        <TextBlock Grid.Row="1" TextWrapping="Wrap" Margin="0,10,0,10" TextAlignment="Center">
+            Przesuwaj elementy na liście, aby ustalić ich ważność. Element na górze listy jest najważniejszy. Algorytm będzie traktował każdy kolejny priorytet jako kryterium rozstrzygające w przypadku remisu na wyższym poziomie.
+        </TextBlock>
+
+        <Grid Grid.Row="2" Margin="0,10,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <Border BorderBrush="DarkGray" BorderThickness="1">
+                <ListBox x:Name="PrioritiesListBox" ItemsSource="{Binding PriorityList}" SelectedItem="{Binding SelectedPriority}" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Margin="5">
+                                <TextBlock Text="{Binding Name}" FontWeight="Bold" TextWrapping="Wrap"/>
+                                <TextBlock Text="{Binding Description}" FontSize="11" Foreground="DarkSlateGray" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </Border>
+
+            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="10,0,0,0">
+                <Button x:Name="MoveUpButton" Content="▲ W górę" Margin="0,0,0,5" Padding="10,5" Click="MoveUp_Click"/>
+                <Button x:Name="MoveDownButton" Content="▼ W dół" Padding="10,5" Click="MoveDown_Click"/>
+            </StackPanel>
+        </Grid>
+
+        <Grid Grid.Row="3" Margin="0,15,0,0">
+            <Button Content="Przywróć domyślne" HorizontalAlignment="Left" Padding="10,5" Click="RestoreDefaults_Click"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="Zapisz i Zamknij" IsDefault="True" Click="Save_Click" Margin="0,0,10,0" Padding="10,5"/>
+                <Button Content="Anuluj" IsCancel="True" Padding="10,5"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

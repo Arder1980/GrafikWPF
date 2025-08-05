@@ -1,0 +1,53 @@
+﻿<Window x:Class="GrafikWPF.InfoWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="Informacje o programie" 
+        Width="550"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="ToolWindow"
+        ResizeMode="NoResize"
+        Background="LightGray">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" FontSize="22" FontWeight="Bold" Text="Grafik Optymalny"/>
+        <TextBlock Grid.Row="1" Margin="0,5,0,20">
+            <Run>Wersja 1.0</Run>
+            <LineBreak/>
+            <Run>Twórca: Adam</Run>
+        </TextBlock>
+
+        <Border Grid.Row="2" BorderBrush="DarkGray" BorderThickness="1" Padding="5">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Height="200">
+                <TextBlock TextWrapping="Wrap" TextAlignment="Justify">
+                    <Run FontWeight="Bold">Licencja MIT (The MIT License)</Run>
+                    <LineBreak/><LineBreak/>
+                    <Run>Copyright (c) 2025 Adam</Run>
+                    <LineBreak/><LineBreak/>
+                    <Run>
+                        Niniejszym udziela się bezpłatnego zezwolenia każdej osobie uzyskującej kopię tego oprogramowania i powiązanych z nim plików dokumentacji („Oprogramowanie”) na korzystanie z Oprogramowania bez ograniczeń, w tym bez ograniczeń prawa do używania, kopiowania, modyfikowania, łączenia, publikowania, dystrybuowania, sublicencjonowania i/lub sprzedawania kopii Oprogramowania, oraz na zezwolenie osobom, którym Oprogramowanie jest dostarczane, na czynienie tego, z zastrzeżeniem następujących warunków:
+                    </Run>
+                    <LineBreak/><LineBreak/>
+                    <Run>
+                        Powyższa informacja o prawach autorskich i niniejsza informacja o zezwoleniu muszą być dołączone do wszystkich kopii lub istotnych części Oprogramowania.
+                    </Run>
+                    <LineBreak/><LineBreak/>
+                    <Run>
+                        OPROGRAMOWANIE JEST DOSTARCZANE „TAK JAK JEST”, BEZ JAKIEJKOLWIEK GWARANCJI, WYRAŹNEJ LUB DOROZUMIANEJ, W TYM MIĘDZY INNYMI GWARANCJI PRZYDATNOŚCI HANDLOWEJ, PRZYDATNOŚCI DO OKREŚLONEGO CELU I NIENARUSZALNOŚCI. W ŻADNYM WYPADKU AUTORZY LUB POSIADACZE PRAW AUTORSKICH NIE PONOSZĄ ODPOWIEDZIALNOŚCI ZA JAKIEKOLWIEK ROSZCZENIA, SZKODY LUB INNĄ ODPOWIEDZIALNOŚĆ, CZY TO W RAMACH UMOWY, DELIKTU CZY W INNY SPOSÓB, WYNIKAJĄCĄ Z, LUB W ZWIĄZKU Z OPROGRAMOWANIEM LUB UŻYTKOWANIEM LUB INNYMI DZIAŁANIAMI W OPROGRAMOWANIU.
+                    </Run>
+                </TextBlock>
+            </ScrollViewer>
+        </Border>
+
+        <Button Grid.Row="3" Content="Zamknij" IsDefault="True" Click="Zamknij_Click" HorizontalAlignment="Right" Margin="0,15,0,0" Padding="10,5"/>
+    </Grid>
+</Window>

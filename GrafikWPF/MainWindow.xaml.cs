@@ -316,12 +316,34 @@ namespace GrafikWPF
             {
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    var templateColumn = new DataGridTemplateColumn { Header = null, Width = new DataGridLength(1, DataGridLengthUnitType.Star) };
-                    string cellTemplateXaml = $@"<DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'><TextBlock Text='{{Binding [{lekarz.Symbol}]}}' HorizontalAlignment='Center' VerticalAlignment='Center'/></DataTemplate>";
-                    string editingTemplateXaml = $@"<DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'><ComboBox ItemsSource='{{Binding DataContext.OpcjeDostepnosci, RelativeSource={{RelativeSource AncestorType=Window}}}}' SelectedItem='{{Binding [{lekarz.Symbol}], Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}}' HorizontalContentAlignment='Center' VerticalContentAlignment='Center' IsDropDownOpen='True'/></DataTemplate>";
-                    templateColumn.CellTemplate = (DataTemplate)XamlReader.Parse(cellTemplateXaml);
-                    templateColumn.CellEditingTemplate = (DataTemplate)XamlReader.Parse(editingTemplateXaml);
-                    templateColumn.CellStyle = singleClickStyle;
+                    var templateColumn = new DataGridTemplateColumn
+                    {
+                        Header = null,
+                        Width = new DataGridLength(1, DataGridLengthUnitType.Star),
+                        CellStyle = singleClickStyle
+                    };
+
+                    var textFactory = new FrameworkElementFactory(typeof(TextBlock));
+                    textFactory.SetValue(TextBlock.HorizontalAlignmentProperty, System.Windows.HorizontalAlignment.Center);
+                    textFactory.SetValue(TextBlock.VerticalAlignmentProperty, System.Windows.VerticalAlignment.Center);
+                    textFactory.SetBinding(TextBlock.TextProperty, new Binding($"[{lekarz.Symbol}]"));
+                    templateColumn.CellTemplate = new DataTemplate { VisualTree = textFactory };
+
+                    var comboFactory = new FrameworkElementFactory(typeof(ComboBox));
+                    comboFactory.SetValue(ComboBox.HorizontalContentAlignmentProperty, System.Windows.HorizontalAlignment.Center);
+                    comboFactory.SetValue(ComboBox.VerticalContentAlignmentProperty, System.Windows.VerticalAlignment.Center);
+                    comboFactory.SetValue(ComboBox.IsDropDownOpenProperty, true);
+                    comboFactory.SetBinding(ItemsControl.ItemsSourceProperty, new Binding("DataContext.OpcjeDostepnosci")
+                    {
+                        RelativeSource = new RelativeSource(RelativeSourceMode.FindAncestor, typeof(Window), 1)
+                    });
+                    comboFactory.SetBinding(ComboBox.SelectedItemProperty, new Binding($"[{lekarz.Symbol}]")
+                    {
+                        Mode = BindingMode.TwoWay,
+                        UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged
+                    });
+                    templateColumn.CellEditingTemplate = new DataTemplate { VisualTree = comboFactory };
+
                     GrafikGrid.Columns.Add(templateColumn);
                 }, DispatcherPriority.Background);
             }

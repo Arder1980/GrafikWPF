@@ -125,6 +125,8 @@ namespace GrafikWPF
         private async Task ReloadViewAsync()
         {
             IsBusy = true;
+            await Task.Yield();
+
             try
             {
                 await ZapiszBiezacyMiesiac();
@@ -145,18 +147,11 @@ namespace GrafikWPF
 
         private async Task AktualizujCaloscInterfejsuAsync(PreparedData preparedData)
         {
-            MainContainer.Visibility = Visibility.Collapsed;
-
             _limityDyzurow = preparedData.Limity;
             _grafikDataTable = preparedData.DataTable;
             _grafikZostalWygenerowany = preparedData.ZapisanyGrafik != null;
 
-            await Task.Run(() =>
-            {
-                Dispatcher.Invoke(() => AktualizujWidokSiatki(preparedData.LekarzeAktywni));
-            });
-
-            GrafikGrid.ItemsSource = _grafikDataTable.DefaultView;
+            await AktualizujGridAsync(preparedData.LekarzeAktywni);
 
             WygenerujNaglowkiElementow(preparedData.LekarzeAktywni);
             WygenerujNaglowekGrupowy(preparedData.LekarzeAktywni);
@@ -166,8 +161,6 @@ namespace GrafikWPF
                 WyswietlWynikWGrid(preparedData.ZapisanyGrafik!);
             }
             UpdateLayoutAndText();
-
-            MainContainer.Visibility = Visibility.Visible;
         }
 
 
@@ -381,6 +374,21 @@ namespace GrafikWPF
             });
         }
 
+        private async Task AktualizujGridAsync(List<Lekarz> lekarzeAktywni)
+        {
+            GrafikGrid.ItemsSource = null;
+
+            await Task.Run(() =>
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    AktualizujWidokSiatki(lekarzeAktywni);
+                });
+            });
+
+            GrafikGrid.ItemsSource = _grafikDataTable.DefaultView;
+        }
+
         private void AktualizujWidokSiatki(List<Lekarz> lekarzeAktywni)
         {
             for (int i = 0; i < MAKS_KOLUMN_LEKARZY; i++)
@@ -551,19 +559,23 @@ namespace GrafikWPF
             MainHeaderGrid.ColumnDefinitions.Clear();
             MainHeaderGrid.Children.Clear();
             MainHeaderGrid.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(79, 79, 79));
-            var columns = GrafikGrid.Columns;
-            if (!columns.Any()) return;
-            for (int i = 0; i < columns.Count; i++)
+
+            var visibleColumns = GrafikGrid.Columns.Where(c => c.Visibility == Visibility.Visible).ToList();
+            if (!visibleColumns.Any()) return;
+
+            for (int i = 0; i < GrafikGrid.Columns.Count; i++)
             {
                 var binding = new Binding($"Columns[{i}].ActualWidth") { Source = GrafikGrid };
                 var colDef = new ColumnDefinition();
                 BindingOperations.SetBinding(colDef, ColumnDefinition.WidthProperty, binding);
                 MainHeaderGrid.ColumnDefinitions.Add(colDef);
             }
+
             var newPadding = new Thickness(0, 8, 0, 8);
             var mainDataHeader = new TextBlock { Text = "Data", FontWeight = FontWeights.Bold, Foreground = Brushes.White, VerticalAlignment = System.Windows.VerticalAlignment.Center, HorizontalAlignment = System.Windows.HorizontalAlignment.Center, Padding = newPadding };
             Grid.SetColumn(mainDataHeader, 0);
             MainHeaderGrid.Children.Add(mainDataHeader);
+
             if (lekarzeAktywni.Any())
             {
                 var mainDeklaracjeHeader = new TextBlock { Text = "Deklaracje dostępności", FontWeight = FontWeights.Bold, Foreground = Brushes.White, VerticalAlignment = System.Windows.VerticalAlignment.Center, HorizontalAlignment = System.Windows.HorizontalAlignment.Center, Padding = newPadding };
@@ -571,12 +583,14 @@ namespace GrafikWPF
                 Grid.SetColumnSpan(mainDeklaracjeHeader, lekarzeAktywni.Count);
                 MainHeaderGrid.Children.Add(mainDeklaracjeHeader);
             }
+
             int secondDateColumnIndex = 1 + lekarzeAktywni.Count;
             var secondDataHeader = new TextBlock { Text = "Data", FontWeight = FontWeights.Bold, Foreground = Brushes.White, VerticalAlignment = System.Windows.VerticalAlignment.Center, HorizontalAlignment = System.Windows.HorizontalAlignment.Center, Padding = newPadding };
             Grid.SetColumn(secondDataHeader, secondDateColumnIndex);
             MainHeaderGrid.Children.Add(secondDataHeader);
+
             var mainWynikHeader = new TextBlock { Text = "Wynik Grafiku", FontWeight = FontWeights.Bold, Foreground = Brushes.White, VerticalAlignment = System.Windows.VerticalAlignment.Center, HorizontalAlignment = System.Windows.HorizontalAlignment.Center, Padding = newPadding };
-            Grid.SetColumn(mainWynikHeader, columns.Count - 1);
+            Grid.SetColumn(mainWynikHeader, secondDateColumnIndex + 1);
             MainHeaderGrid.Children.Add(mainWynikHeader);
         }
 
@@ -596,6 +610,7 @@ namespace GrafikWPF
             ItemHeaderGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             ItemHeaderGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             ItemHeaderGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
             for (int i = 0; i < columns.Count; i++)
             {
                 var binding = new Binding($"Columns[{i}].ActualWidth") { Source = GrafikGrid };
@@ -603,20 +618,24 @@ namespace GrafikWPF
                 BindingOperations.SetBinding(colDef, ColumnDefinition.WidthProperty, binding);
                 ItemHeaderGrid.ColumnDefinitions.Add(colDef);
             }
+
             var settingsBtn = new Button { Content = "Edycja dyżurnych", Padding = new Thickness(4, 1, 4, 1), Margin = new Thickness(2) };
             settingsBtn.Click += SettingsButton_Click;
             Grid.SetRow(settingsBtn, 0);
             Grid.SetColumn(settingsBtn, 0);
             ItemHeaderGrid.Children.Add(settingsBtn);
+
             _maksDyzurTextBlock = new TextBlock { Text = "Maks. dyżurów", FontWeight = FontWeights.Bold, HorizontalAlignment = System.Windows.HorizontalAlignment.Center, VerticalAlignment = System.Windows.VerticalAlignment.Center };
             Grid.SetRow(_maksDyzurTextBlock, 2);
             Grid.SetColumn(_maksDyzurTextBlock, 0);
             ItemHeaderGrid.Children.Add(_maksDyzurTextBlock);
+
             var separator = new Border { BorderBrush = Brushes.DarkGray, BorderThickness = new Thickness(0, 0, 0, 1), Margin = new Thickness(0, 4, 0, 4) };
             Grid.SetRow(separator, 1);
             Grid.SetColumn(separator, 0);
             Grid.SetColumnSpan(separator, columns.Count);
             ItemHeaderGrid.Children.Add(separator);
+
             int columnIndex = 1;
             foreach (var lekarz in lekarzeAktywni)
             {
@@ -649,7 +668,7 @@ namespace GrafikWPF
             _generateButton.SizeChanged += SyncButtonSizes;
 
             Grid.SetRow(buttonFactory, 2);
-            Grid.SetColumn(buttonFactory, columns.Count - 1);
+            Grid.SetColumn(buttonFactory, 1 + lekarzeAktywni.Count + 1);
             ItemHeaderGrid.Children.Add(buttonFactory);
         }
 

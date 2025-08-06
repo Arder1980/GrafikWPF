@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:GrafikWPF"
         mc:Ignorable="d"
-        Title="Ustawienia Priorytetów Solver'a" 
+        Title="Priorytety algorytmu" 
         SizeToContent="Height" Width="650"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"

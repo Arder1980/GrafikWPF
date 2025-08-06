@@ -12,19 +12,18 @@ namespace GrafikWPF
 {
     public partial class PrioritiesWindow : Window, INotifyPropertyChanged
     {
-        // Klasa pomocnicza do reprezentowania elementu na liście w UI
         public class PriorityItem
         {
             public SolverPriority Priority { get; set; }
-            public string Name { get; set; }
-            public string Description { get; set; }
+            public string Name { get; set; } = string.Empty;
+            public string Description { get; set; } = string.Empty;
         }
 
         public ObservableCollection<PriorityItem> PriorityList { get; set; }
         public List<SolverPriority> NewOrder { get; private set; }
 
-        private PriorityItem _selectedPriority;
-        public PriorityItem SelectedPriority
+        private PriorityItem? _selectedPriority;
+        public PriorityItem? SelectedPriority
         {
             get => _selectedPriority;
             set { _selectedPriority = value; OnPropertyChanged(); UpdateButtonState(); }
@@ -39,7 +38,7 @@ namespace GrafikWPF
             NewOrder = new List<SolverPriority>(currentOrder);
 
             LoadPriorities(currentOrder);
-            UpdateItemNames(); // Dodatkowe wywołanie, aby zapewnić poprawne etykiety od startu
+            UpdateItemNames();
         }
 
         private void LoadPriorities(List<SolverPriority> order)
@@ -68,7 +67,7 @@ namespace GrafikWPF
             return new PriorityItem
             {
                 Priority = priority,
-                Name = GetEnumDescription(priority), // Nazwa będzie teraz ustawiana przez UpdateItemNames
+                Name = GetEnumDescription(priority),
                 Description = GetEnumLongDescription(priority)
             };
         }
@@ -142,8 +141,10 @@ namespace GrafikWPF
 
         public static string GetEnumDescription(Enum value)
         {
-            FieldInfo fi = value.GetType().GetField(value.ToString());
-            DescriptionAttribute[] attributes = fi.GetCustomAttributes(typeof(DescriptionAttribute), false) as DescriptionAttribute[];
+            FieldInfo? fi = value.GetType().GetField(value.ToString());
+            if (fi == null) return value.ToString();
+
+            DescriptionAttribute[]? attributes = fi.GetCustomAttributes(typeof(DescriptionAttribute), false) as DescriptionAttribute[];
             if (attributes != null && attributes.Any())
             {
                 return attributes.First().Description;
@@ -170,8 +171,8 @@ namespace GrafikWPF
             }
         }
 
-        public event PropertyChangedEventHandler PropertyChanged;
-        protected void OnPropertyChanged([CallerMemberName] string name = null)
+        public event PropertyChangedEventHandler? PropertyChanged;
+        protected void OnPropertyChanged([CallerMemberName] string? name = null)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
             UpdateButtonState();

@@ -23,8 +23,8 @@
                 <TextBlock FontWeight="Bold" FontSize="16">Jak działa algorytm optymalizujący?</TextBlock>
                 <LineBreak/><LineBreak/>
                 <Run>
-                    Silnik aplikacji (GrafikSolver) ma za zadanie znaleźć jeden, możliwie najlepszy grafik, bazując na wprowadzonych przez Ciebie dostępnościach i ograniczeniach. Proces ten jest realizowany przez algorytm rekurencyjny z nawrotami (backtracking), który systematycznie przeszukuje drzewo możliwych rozwiązań.
-                </Run>
+                    Silnik aplikacji (GrafikSolver) jest algorytmem obliczeniowym, którego zadaniem jest znalezienie jednego, możliwie najlepszego grafiku, bazując na wprowadzonych przez Ciebie dostępnościach i ograniczeniach. Proces ten jest realizowany przez algorytm rekurencyjny z nawrotami (backtracking), który systematycznie przeszukuje drzewo możliwych rozwiązań.
+                </Run>                
                 <LineBreak/><LineBreak/>
                 <TextBlock FontWeight="Bold" FontSize="14">Hierarchia priorytetów</TextBlock>
                 <LineBreak/>

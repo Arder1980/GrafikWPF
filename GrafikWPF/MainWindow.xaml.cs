@@ -52,6 +52,20 @@ namespace GrafikWPF
             set { _isBusy = value; OnPropertyChanged(); }
         }
 
+        private bool _isGenerating;
+        public bool IsGenerating
+        {
+            get => _isGenerating;
+            set { _isGenerating = value; OnPropertyChanged(); }
+        }
+
+        private string _busyMessage = "Przetwarzanie...";
+        public string BusyMessage
+        {
+            get => _busyMessage;
+            set { _busyMessage = value; OnPropertyChanged(); }
+        }
+
         private double _generationProgress;
         public double GenerationProgress
         {
@@ -118,49 +132,61 @@ namespace GrafikWPF
             if (_isInitializing || IsBusy) return;
             if (e != null && e.OriginalSource is ComboBox)
             {
-                Dispatcher.BeginInvoke(new Action(async () => await ReloadViewAsync()), DispatcherPriority.ContextIdle);
+                Dispatcher.BeginInvoke(new Action(async () => {
+                    await ZapiszBiezacyMiesiac();
+                    await ReloadViewAsync();
+                }), DispatcherPriority.ContextIdle);
             }
         }
 
         private async Task ReloadViewAsync()
         {
+            BusyMessage = "Odświeżanie widoku...";
+            IsGenerating = false;
             IsBusy = true;
             await Task.Yield();
 
             try
             {
-                await ZapiszBiezacyMiesiac();
-
                 if (YearComboBox.SelectedItem == null || MonthComboBox.SelectedItem == null) return;
                 int rok = (int)YearComboBox.SelectedItem;
                 int miesiac = MonthComboBox.SelectedIndex + 1;
 
                 UpdatePriorityInfo();
                 var preparedData = await WygenerujDaneWtle(rok, miesiac);
-                await AktualizujCaloscInterfejsuAsync(preparedData);
+                AktualizujCaloscInterfejsu(preparedData);
             }
             finally
             {
-                IsBusy = false;
+                Dispatcher.BeginInvoke(new Action(() => { IsBusy = false; }), DispatcherPriority.ContextIdle);
             }
         }
 
-        private async Task AktualizujCaloscInterfejsuAsync(PreparedData preparedData)
+        private void AktualizujCaloscInterfejsu(PreparedData preparedData)
         {
             _limityDyzurow = preparedData.Limity;
             _grafikDataTable = preparedData.DataTable;
             _grafikZostalWygenerowany = preparedData.ZapisanyGrafik != null;
 
-            await AktualizujGridAsync(preparedData.LekarzeAktywni);
+            AktualizujWidokSiatki(preparedData.LekarzeAktywni);
 
-            WygenerujNaglowkiElementow(preparedData.LekarzeAktywni);
-            WygenerujNaglowekGrupowy(preparedData.LekarzeAktywni);
+            GrafikGrid.ItemsSource = _grafikDataTable.DefaultView;
 
-            if (_grafikZostalWygenerowany)
+            if (GrafikGrid.ItemsSource != null)
             {
-                WyswietlWynikWGrid(preparedData.ZapisanyGrafik!);
+                CollectionViewSource.GetDefaultView(GrafikGrid.ItemsSource).Refresh();
             }
-            UpdateLayoutAndText();
+
+            // ### ZMIANA ### Zlecenie wypełnienia nagłówków Dyspozytorowi z niskim priorytetem
+            Dispatcher.BeginInvoke(new Action(() => {
+                WypelnijNaglowkiDanymi(preparedData.LekarzeAktywni);
+
+                if (_grafikZostalWygenerowany)
+                {
+                    WyswietlWynikWGrid(preparedData.ZapisanyGrafik!);
+                }
+                UpdateLayoutAndText();
+            }), DispatcherPriority.Background);
         }
 
 
@@ -178,7 +204,7 @@ namespace GrafikWPF
             var dostepnosc = new Dictionary<DateTime, Dictionary<string, TypDostepnosci>>();
             await Task.Run(() =>
             {
-                if (_grafikDataTable == null) return;
+                if (_grafikDataTable == null || _grafikDataTable.Rows.Count == 0) return;
                 var lekarzeAktywni = DataManager.AppData.WszyscyLekarze.Where(l => l.IsAktywny).OrderBy(l => l.Nazwisko).ThenBy(l => l.Imie).ToList();
 
                 foreach (DataRow row in _grafikDataTable.Rows)
@@ -190,8 +216,11 @@ namespace GrafikWPF
                     {
                         var lekarz = lekarzeAktywni[i];
                         string nazwaKolumny = $"Lekarz_{i}";
-                        _mapaNazwDostepnosci.TryGetValue(row[nazwaKolumny].ToString() ?? "---", out var typ);
-                        wpisyDnia[lekarz.Symbol] = typ;
+                        if (_grafikDataTable.Columns.Contains(nazwaKolumny))
+                        {
+                            _mapaNazwDostepnosci.TryGetValue(row[nazwaKolumny].ToString() ?? "---", out var typ);
+                            wpisyDnia[lekarz.Symbol] = typ;
+                        }
                     }
                     dostepnosc[data] = wpisyDnia;
                 }
@@ -243,6 +272,7 @@ namespace GrafikWPF
         private DataTable PrzygotujSiatkeDanychNowyMiesiac(int rok, int miesiac, List<Lekarz> lekarzeAktywni)
         {
             var dt = StworzPustaSiatkeDanych();
+
             int dniWMiesiacu = DateTime.DaysInMonth(rok, miesiac);
             for (int dzien = 1; dzien <= dniWMiesiacu; dzien++)
             {
@@ -250,7 +280,7 @@ namespace GrafikWPF
                 var row = dt.NewRow();
                 row["FullDate"] = data;
                 row["Data"] = data.ToString("dd.MM (dddd)", new CultureInfo("pl-PL"));
-                for (int i = 0; i < lekarzeAktywni.Count; i++)
+                for (int i = 0; i < MAKS_KOLUMN_LEKARZY; i++)
                 {
                     row[$"Lekarz_{i}"] = "---";
                 }
@@ -264,6 +294,7 @@ namespace GrafikWPF
         private DataTable PrzygotujSiatkeDanychZBiezacychDanych(int rok, int miesiac, List<Lekarz> lekarzeAktywni, DaneMiesiaca daneMiesiaca)
         {
             var dt = StworzPustaSiatkeDanych();
+
             int dniWMiesiacu = DateTime.DaysInMonth(rok, miesiac);
             for (int dzien = 1; dzien <= dniWMiesiacu; dzien++)
             {
@@ -281,17 +312,6 @@ namespace GrafikWPF
                         {
                             row[$"Lekarz_{i}"] = _mapaDostepnosciDoNazw.GetValueOrDefault(typ, "---");
                         }
-                        else
-                        {
-                            row[$"Lekarz_{i}"] = "---";
-                        }
-                    }
-                }
-                else
-                {
-                    for (int i = 0; i < lekarzeAktywni.Count; i++)
-                    {
-                        row[$"Lekarz_{i}"] = "---";
                     }
                 }
 
@@ -304,16 +324,17 @@ namespace GrafikWPF
 
         private void InicjalizujStaleKolumnySiatki()
         {
-            var singleClickStyle = (Style)this.TryFindResource("SingleClickEditingCellStyle");
             var staticStyle = (Style)this.TryFindResource("StaticColumnStyle");
             var centerTextStyle = (Style)this.TryFindResource("CenterVTextBlockStyle");
+            var singleClickStyle = (Style)this.TryFindResource("SingleClickEditingCellStyle");
 
             GrafikGrid.Columns.Add(new DataGridTextColumn
             {
                 Header = null,
                 Binding = new Binding("[Data]"),
                 IsReadOnly = true,
-                Width = new DataGridLength(1.5, DataGridLengthUnitType.Star),
+                // ### ZMIANA ### Ustawienie stałej szerokości
+                Width = 130,
                 CellStyle = staticStyle,
                 ElementStyle = centerTextStyle
             });
@@ -358,7 +379,8 @@ namespace GrafikWPF
                 Header = null,
                 Binding = new Binding("[Data_Powtorzona]"),
                 IsReadOnly = true,
-                Width = new DataGridLength(1.5, DataGridLengthUnitType.Star),
+                // ### ZMIANA ### Ustawienie stałej szerokości
+                Width = 130,
                 CellStyle = staticStyle,
                 ElementStyle = centerTextStyle
             });
@@ -368,63 +390,36 @@ namespace GrafikWPF
                 Header = null,
                 Binding = new Binding("[Wynik]"),
                 IsReadOnly = true,
-                Width = new DataGridLength(1.5, DataGridLengthUnitType.Star),
+                // ### ZMIANA ### Ustawienie stałej szerokości
+                Width = 130,
                 CellStyle = staticStyle,
                 ElementStyle = centerTextStyle
             });
         }
-
-        private async Task AktualizujGridAsync(List<Lekarz> lekarzeAktywni)
-        {
-            GrafikGrid.ItemsSource = null;
-
-            await Task.Run(() =>
-            {
-                Dispatcher.Invoke(() =>
-                {
-                    AktualizujWidokSiatki(lekarzeAktywni);
-                });
-            });
-
-            GrafikGrid.ItemsSource = _grafikDataTable.DefaultView;
-        }
-
         private void AktualizujWidokSiatki(List<Lekarz> lekarzeAktywni)
         {
             for (int i = 0; i < MAKS_KOLUMN_LEKARZY; i++)
             {
-                var column = _doctorColumns[i];
-                if (i < lekarzeAktywni.Count)
+                if (i < _doctorColumns.Count)
                 {
-                    column.Visibility = Visibility.Visible;
-                }
-                else
-                {
-                    column.Visibility = Visibility.Collapsed;
+                    var column = _doctorColumns[i];
+                    if (i < lekarzeAktywni.Count)
+                    {
+                        column.Visibility = Visibility.Visible;
+                    }
+                    else
+                    {
+                        column.Visibility = Visibility.Collapsed;
+                    }
                 }
             }
         }
-
-        private void TableContainerGrid_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateLayoutAndText();
 
         private void UpdateLayoutAndText()
         {
             UpdateRowHeights();
             UpdateMaksDyzurText();
             UpdateResultColumnDisplay();
-            SyncButtonSizes();
-        }
-
-        private void SyncButtonSizes(object? sender = null, SizeChangedEventArgs? e = null)
-        {
-            if (_generateButton != null && ExportButton.IsLoaded && _generateButton.IsLoaded)
-            {
-                if (_generateButton.ActualWidth > 0)
-                {
-                    ExportButton.Width = _generateButton.ActualWidth;
-                    ExportButton.Height = _generateButton.ActualHeight;
-                }
-            }
         }
 
         private void UpdateRowHeights()
@@ -432,23 +427,28 @@ namespace GrafikWPF
             if (!this.IsLoaded || GrafikGrid.Items.Count <= 0) return;
             double headerRowHeight = 35;
             DateSelectorRow.Height = new GridLength(headerRowHeight);
+
             if (ItemHeaderGrid.RowDefinitions.Count >= 3)
             {
                 ItemHeaderGrid.RowDefinitions[0].Height = new GridLength(headerRowHeight);
                 ItemHeaderGrid.RowDefinitions[2].Height = new GridLength(headerRowHeight);
             }
             MainHeaderGrid.Height = headerRowHeight;
+
             HeaderStackPanel.UpdateLayout();
             double headersActualHeight = HeaderStackPanel.ActualHeight;
-
             double footerHeight = FooterPanel.ActualHeight + FooterPanel.Margin.Top + FooterPanel.Margin.Bottom;
 
             double containerHeight = TableContainerGrid.ActualHeight;
-            double dataGridAvailableHeight = containerHeight - headersActualHeight - footerHeight;
-            dataGridAvailableHeight -= 2;
-            if (dataGridAvailableHeight > 1)
+            double gridRowZeroHeight = containerHeight - footerHeight;
+
+            if (gridRowZeroHeight > headersActualHeight)
             {
-                GrafikGrid.RowHeight = dataGridAvailableHeight / GrafikGrid.Items.Count;
+                double dataGridAvailableHeight = gridRowZeroHeight - headersActualHeight - 2;
+                if (dataGridAvailableHeight > 1)
+                {
+                    GrafikGrid.RowHeight = dataGridAvailableHeight / GrafikGrid.Items.Count;
+                }
             }
         }
 
@@ -504,7 +504,7 @@ namespace GrafikWPF
             legendaWindow.ShowDialog();
         }
 
-        private void Info_Click(object? sender, RoutedEventArgs e)
+        private void Info_Click(object sender, RoutedEventArgs e)
         {
             var infoWindow = new InfoWindow { Owner = this };
             infoWindow.ShowDialog();
@@ -515,14 +515,19 @@ namespace GrafikWPF
             this.Close();
         }
 
-        private void SettingsButton_Click(object? sender, RoutedEventArgs e)
+        private async void SettingsButton_Click(object? sender, RoutedEventArgs e)
         {
+            await ZapiszBiezacyMiesiac();
+
             var settingsWindow = new UstawieniaLekarzyWindow(DataManager.AppData.WszyscyLekarze) { Owner = this };
             bool? result = settingsWindow.ShowDialog();
+
             if (result == true)
             {
-                DataManager.AppData.WszyscyLekarze = settingsWindow.ZaktualizowaniLekarze;
-                Dispatcher.BeginInvoke(new Action(async () => await ReloadViewAsync()), DispatcherPriority.ContextIdle);
+                var updatedList = settingsWindow.ZaktualizowaniLekarze;
+                DataManager.AppData.WszyscyLekarze.Clear();
+                DataManager.AppData.WszyscyLekarze.AddRange(updatedList);
+                await ReloadViewAsync();
             }
         }
 
@@ -554,14 +559,21 @@ namespace GrafikWPF
             MonthComboBox.SelectedIndex = dataStartowa.Month - 1;
         }
 
-        private void WygenerujNaglowekGrupowy(List<Lekarz> lekarzeAktywni)
+        private void WypelnijNaglowkiDanymi(List<Lekarz> lekarzeAktywni)
         {
             MainHeaderGrid.ColumnDefinitions.Clear();
+            ItemHeaderGrid.ColumnDefinitions.Clear();
             MainHeaderGrid.Children.Clear();
-            MainHeaderGrid.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(79, 79, 79));
+            ItemHeaderGrid.Children.Clear();
+            ItemHeaderGrid.RowDefinitions.Clear();
 
-            var visibleColumns = GrafikGrid.Columns.Where(c => c.Visibility == Visibility.Visible).ToList();
-            if (!visibleColumns.Any()) return;
+            ItemHeaderGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            ItemHeaderGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            ItemHeaderGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            MainHeaderGrid.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(79, 79, 79));
+            var borderBrush = Brushes.DarkGray;
+            var borderThickness = new Thickness(0, 0, 1, 1);
 
             for (int i = 0; i < GrafikGrid.Columns.Count; i++)
             {
@@ -569,72 +581,56 @@ namespace GrafikWPF
                 var colDef = new ColumnDefinition();
                 BindingOperations.SetBinding(colDef, ColumnDefinition.WidthProperty, binding);
                 MainHeaderGrid.ColumnDefinitions.Add(colDef);
+
+                var colDef2 = new ColumnDefinition();
+                BindingOperations.SetBinding(colDef2, ColumnDefinition.WidthProperty, binding);
+                ItemHeaderGrid.ColumnDefinitions.Add(colDef2);
             }
 
             var newPadding = new Thickness(0, 8, 0, 8);
             var mainDataHeader = new TextBlock { Text = "Data", FontWeight = FontWeights.Bold, Foreground = Brushes.White, VerticalAlignment = System.Windows.VerticalAlignment.Center, HorizontalAlignment = System.Windows.HorizontalAlignment.Center, Padding = newPadding };
-            Grid.SetColumn(mainDataHeader, 0);
-            MainHeaderGrid.Children.Add(mainDataHeader);
+            var mainDataHeaderBorder = new Border { Child = mainDataHeader, BorderBrush = borderBrush, BorderThickness = borderThickness };
+            Grid.SetColumn(mainDataHeaderBorder, 0);
+            MainHeaderGrid.Children.Add(mainDataHeaderBorder);
 
             if (lekarzeAktywni.Any())
             {
                 var mainDeklaracjeHeader = new TextBlock { Text = "Deklaracje dostępności", FontWeight = FontWeights.Bold, Foreground = Brushes.White, VerticalAlignment = System.Windows.VerticalAlignment.Center, HorizontalAlignment = System.Windows.HorizontalAlignment.Center, Padding = newPadding };
-                Grid.SetColumn(mainDeklaracjeHeader, 1);
-                Grid.SetColumnSpan(mainDeklaracjeHeader, lekarzeAktywni.Count);
-                MainHeaderGrid.Children.Add(mainDeklaracjeHeader);
+                var mainDeklaracjeHeaderBorder = new Border { Child = mainDeklaracjeHeader, BorderBrush = borderBrush, BorderThickness = borderThickness };
+                Grid.SetColumn(mainDeklaracjeHeaderBorder, 1);
+                Grid.SetColumnSpan(mainDeklaracjeHeaderBorder, lekarzeAktywni.Count);
+                MainHeaderGrid.Children.Add(mainDeklaracjeHeaderBorder);
             }
 
-            int secondDateColumnIndex = 1 + lekarzeAktywni.Count;
+            int secondDateColIndex = 1 + MAKS_KOLUMN_LEKARZY;
+            int resultColIndex = secondDateColIndex + 1;
+
             var secondDataHeader = new TextBlock { Text = "Data", FontWeight = FontWeights.Bold, Foreground = Brushes.White, VerticalAlignment = System.Windows.VerticalAlignment.Center, HorizontalAlignment = System.Windows.HorizontalAlignment.Center, Padding = newPadding };
-            Grid.SetColumn(secondDataHeader, secondDateColumnIndex);
-            MainHeaderGrid.Children.Add(secondDataHeader);
+            var secondDataHeaderBorder = new Border { Child = secondDataHeader, BorderBrush = borderBrush, BorderThickness = borderThickness };
+            Grid.SetColumn(secondDataHeaderBorder, secondDateColIndex);
+            MainHeaderGrid.Children.Add(secondDataHeaderBorder);
 
             var mainWynikHeader = new TextBlock { Text = "Wynik Grafiku", FontWeight = FontWeights.Bold, Foreground = Brushes.White, VerticalAlignment = System.Windows.VerticalAlignment.Center, HorizontalAlignment = System.Windows.HorizontalAlignment.Center, Padding = newPadding };
-            Grid.SetColumn(mainWynikHeader, secondDateColumnIndex + 1);
-            MainHeaderGrid.Children.Add(mainWynikHeader);
-        }
+            var mainWynikHeaderBorder = new Border { Child = mainWynikHeader, BorderBrush = borderBrush, BorderThickness = borderThickness };
+            Grid.SetColumn(mainWynikHeaderBorder, resultColIndex);
+            MainHeaderGrid.Children.Add(mainWynikHeaderBorder);
 
-        private void WygenerujNaglowkiElementow(List<Lekarz> lekarzeAktywni)
-        {
-            ItemHeaderGrid.ColumnDefinitions.Clear();
-            ItemHeaderGrid.Children.Clear();
-            ItemHeaderGrid.RowDefinitions.Clear();
-
-            if (_generateButton != null)
-            {
-                _generateButton.SizeChanged -= SyncButtonSizes;
-            }
-
-            var columns = GrafikGrid.Columns;
-            if (!columns.Any()) return;
-            ItemHeaderGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            ItemHeaderGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            ItemHeaderGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-
-            for (int i = 0; i < columns.Count; i++)
-            {
-                var binding = new Binding($"Columns[{i}].ActualWidth") { Source = GrafikGrid };
-                var colDef = new ColumnDefinition();
-                BindingOperations.SetBinding(colDef, ColumnDefinition.WidthProperty, binding);
-                ItemHeaderGrid.ColumnDefinitions.Add(colDef);
-            }
-
-            var settingsBtn = new Button { Content = "Edycja dyżurnych", Padding = new Thickness(4, 1, 4, 1), Margin = new Thickness(2) };
+            var settingsBtn = new Button { Content = "Zarządzanie dyżurnymi", Padding = new Thickness(4, 1, 4, 1), Margin = new Thickness(2) };
             settingsBtn.Click += SettingsButton_Click;
             Grid.SetRow(settingsBtn, 0);
             Grid.SetColumn(settingsBtn, 0);
             ItemHeaderGrid.Children.Add(settingsBtn);
 
+            var separator = new Border { BorderBrush = Brushes.DarkGray, BorderThickness = new Thickness(0, 0, 0, 1), Margin = new Thickness(0, 4, 0, 4) };
+            Grid.SetRow(separator, 1);
+            Grid.SetColumn(separator, 0);
+            Grid.SetColumnSpan(separator, ItemHeaderGrid.ColumnDefinitions.Count);
+            ItemHeaderGrid.Children.Add(separator);
+
             _maksDyzurTextBlock = new TextBlock { Text = "Maks. dyżurów", FontWeight = FontWeights.Bold, HorizontalAlignment = System.Windows.HorizontalAlignment.Center, VerticalAlignment = System.Windows.VerticalAlignment.Center };
             Grid.SetRow(_maksDyzurTextBlock, 2);
             Grid.SetColumn(_maksDyzurTextBlock, 0);
             ItemHeaderGrid.Children.Add(_maksDyzurTextBlock);
-
-            var separator = new Border { BorderBrush = Brushes.DarkGray, BorderThickness = new Thickness(0, 0, 0, 1), Margin = new Thickness(0, 4, 0, 4) };
-            Grid.SetRow(separator, 1);
-            Grid.SetColumn(separator, 0);
-            Grid.SetColumnSpan(separator, columns.Count);
-            ItemHeaderGrid.Children.Add(separator);
 
             int columnIndex = 1;
             foreach (var lekarz in lekarzeAktywni)
@@ -643,6 +639,7 @@ namespace GrafikWPF
                 Grid.SetRow(symbolBlock, 0);
                 Grid.SetColumn(symbolBlock, columnIndex);
                 ItemHeaderGrid.Children.Add(symbolBlock);
+
                 var textBox = new TextBox
                 {
                     Text = _limityDyzurow.GetValueOrDefault(lekarz.Symbol, 0).ToString(),
@@ -661,15 +658,11 @@ namespace GrafikWPF
                 columnIndex++;
             }
 
-            var buttonFactory = new Button { Content = "Generuj Grafik", Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(2) };
-            buttonFactory.Click += new RoutedEventHandler(GenerateButton_Click);
-
-            _generateButton = buttonFactory;
-            _generateButton.SizeChanged += SyncButtonSizes;
-
-            Grid.SetRow(buttonFactory, 2);
-            Grid.SetColumn(buttonFactory, 1 + lekarzeAktywni.Count + 1);
-            ItemHeaderGrid.Children.Add(buttonFactory);
+            _generateButton = new Button { Content = "Generuj Grafik", Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(2) };
+            _generateButton.Click += new RoutedEventHandler(GenerateButton_Click);
+            Grid.SetRow(_generateButton, 2);
+            Grid.SetColumn(_generateButton, resultColIndex);
+            ItemHeaderGrid.Children.Add(_generateButton);
         }
 
         private void LimitTextBox_LostFocus(object? sender, RoutedEventArgs e)
@@ -722,8 +715,12 @@ namespace GrafikWPF
                 MessageBox.Show("Przynajmniej jeden z lekarzy musi mieć wprowadzoną maksymalną liczbę dyżurów większą od 0.", "Brak limitów dyżurów", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
-            IsBusy = true;
+
+            BusyMessage = "Generowanie grafiku...";
             GenerationProgress = 0;
+            IsGenerating = true;
+            IsBusy = true;
+
             var lekarzeAktywni = DataManager.AppData.WszyscyLekarze.Where(l => l.IsAktywny).ToList();
             var dostepnosc = DataManager.AppData.DaneGrafikow[_aktualnyKluczMiesiaca!].Dostepnosc;
             var daneDoSilnika = new GrafikWejsciowy { Lekarze = lekarzeAktywni, Dostepnosc = dostepnosc, LimityDyzurow = _limityDyzurow };
@@ -733,8 +730,11 @@ namespace GrafikWPF
             var solver = new GrafikSolver(daneDoSilnika, DataManager.AppData.KolejnoscPriorytetowSolvera, progress);
 
             RozwiazanyGrafik wynik = await Task.Run(() => solver.ZnajdzOptymalneRozwiazanie());
+
             DataManager.AppData.DaneGrafikow[_aktualnyKluczMiesiaca!].ZapisanyGrafik = wynik;
             WyswietlWynikWGrid(wynik);
+
+            IsGenerating = false;
             IsBusy = false;
         }
 
@@ -811,11 +811,17 @@ namespace GrafikWPF
             }
 
             var sb = new StringBuilder();
-            sb.AppendLine("Data\tDyżurny");
             foreach (DataRow row in _grafikDataTable.Rows)
             {
-                string dyzurny = row["WynikLekarz"] is Lekarz lekarz ? lekarz.PelneImie : "--- BRAK OBSADY ---";
-                sb.AppendLine($"{row["Data"]}\t{dyzurny}");
+                if (row["WynikLekarz"] is Lekarz lekarz)
+                {
+                    string initial = !string.IsNullOrEmpty(lekarz.Imie) ? $"{lekarz.Imie[0]}." : "";
+                    sb.AppendLine($"{lekarz.Nazwisko} {initial}".Trim());
+                }
+                else
+                {
+                    sb.AppendLine("--- BRAK OBSADY ---");
+                }
             }
 
             bool success = await SetClipboardTextWithRetryAsync(sb.ToString());
@@ -831,18 +837,32 @@ namespace GrafikWPF
 
         private async Task<bool> SetClipboardTextWithRetryAsync(string text)
         {
-            for (int i = 0; i < 10; i++)
+            const int retries = 10;
+            const int delay = 100;
+
+            for (int i = 0; i < retries; i++)
             {
                 try
                 {
-                    var dataObject = new DataObject();
-                    dataObject.SetText(text);
-                    Clipboard.SetDataObject(dataObject, true);
+                    Clipboard.Clear();
+                    Clipboard.SetText(text);
                     return true;
                 }
-                catch (System.Runtime.InteropServices.COMException)
+                catch (System.Runtime.InteropServices.COMException ex)
                 {
-                    await Task.Delay(100);
+                    const uint CLIPBRD_E_CANT_OPEN = 0x800401D0;
+                    if ((uint)ex.ErrorCode == CLIPBRD_E_CANT_OPEN)
+                    {
+                        await Task.Delay(delay);
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+                catch (Exception)
+                {
+                    return false;
                 }
             }
             return false;

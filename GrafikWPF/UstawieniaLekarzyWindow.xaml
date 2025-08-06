@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:GrafikWPF"
         mc:Ignorable="d"
-        Title="Edycja dyżurnych" Height="480" Width="690"
+        Title="Edycja dyżurnych" Height="480" Width="585"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
         Background="LightGray"
@@ -41,9 +41,9 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="25"/>
                 <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="0.6*"/>
-                <ColumnDefinition Width="0.4*"/>
-                <ColumnDefinition Width="140"/>
+                <ColumnDefinition Width="150"/>
+                <ColumnDefinition Width="75"/>
+                <ColumnDefinition Width="125"/>
             </Grid.ColumnDefinitions>
 
             <Border Grid.Column="0" Background="#4F4F4F" BorderBrush="#4F4F4F" BorderThickness="0,0,1,1"/>
@@ -108,8 +108,8 @@
                                     <TextBox Text="{Binding Symbol, UpdateSourceTrigger=PropertyChanged}" MaxLength="3" CharacterCasing="Upper" Style="{StaticResource DataTextBoxStyle}" HorizontalContentAlignment="Center" LostFocus="PoleDanych_LostFocus"/>
                                 </Border>
                                 <Border Grid.Column="4" BorderBrush="DarkGray" BorderThickness="0,0,1,1" VerticalAlignment="Center" Padding="0,2">
-                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                        <Button Content="Usuń" Click="ArchiwizujLekarza_Click" Width="70">
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,17,0">
+                                        <Button Content="Usuń" Click="ArchiwizujLekarza_Click" Width="60">
                                             <Button.Style>
                                                 <Style TargetType="Button">
                                                     <Setter Property="Visibility" Value="Visible"/>
@@ -161,8 +161,7 @@
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
-            <Button Grid.Column="0" Content="Dodaj nowego lekarza" Click="DodajLekarza_Click" Padding="10,5" HorizontalAlignment="Left"/>
-
+            <Button Grid.Column="0" Content="Dodaj nowego dyżurnego" Click="DodajLekarza_Click" Padding="10,5" HorizontalAlignment="Left"/>
             <CheckBox x:Name="PokazUsunietychCheckBox" Grid.Column="1" Content="Pokaż usuniętych" VerticalAlignment="Center" HorizontalAlignment="Left" Margin="20,0,0,0"
                       Checked="PokazUsunietychCheckBox_Changed" Unchecked="PokazUsunietychCheckBox_Changed"/>
 

@@ -1,13 +1,8 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Collections.ObjectModel;
-using System.ComponentModel;
+﻿using System.Collections.ObjectModel;
 using System.Globalization;
-using System.Linq;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Data;
 using System.Windows.Media;
 
 namespace GrafikWPF
@@ -39,7 +34,7 @@ namespace GrafikWPF
             var czyPokazacUsunietych = PokazUsunietychCheckBox.IsChecked == true;
 
             var lekarzeDoWyswietlenia = _wszyscyLekarze
-                .Where(l => l.IsAktywny || czyPokazacUsunietych)
+                .Where(l => !l.IsUkryty && (l.IsAktywny || czyPokazacUsunietych))
                 .OrderBy(l => !l.IsAktywny)
                 .ThenBy(l => l.Nazwisko)
                 .ThenBy(l => l.Imie);
@@ -65,14 +60,14 @@ namespace GrafikWPF
 
             if (duplicate != null)
             {
-                MessageBox.Show($"Wykryto duplikat. Lekarz '{duplicate.PelneImie}' z symbolem '{duplicate.Symbol}' już istnieje na liście.", "Zduplikowane Dane", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show($"Wykryto duplikat. Dyżurny '{duplicate.PelneImie}' z symbolem '{duplicate.Symbol}' już istnieje na liście.", "Zduplikowane Dane", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
         }
 
         private void Zapisz_Click(object sender, RoutedEventArgs e)
         {
             var grupyDuplikatow = _wszyscyLekarze
-                .Where(l => !string.IsNullOrWhiteSpace(l.Imie) && !string.IsNullOrWhiteSpace(l.Nazwisko) && !string.IsNullOrWhiteSpace(l.Symbol))
+                .Where(l => !l.IsUkryty && !string.IsNullOrWhiteSpace(l.Imie) && !string.IsNullOrWhiteSpace(l.Nazwisko) && !string.IsNullOrWhiteSpace(l.Symbol))
                 .GroupBy(l => $"{l.Imie.Trim().ToLower()}|{l.Nazwisko.Trim().ToLower()}|{l.Symbol.Trim().ToUpper()}")
                 .Where(g => g.Count() > 1)
                 .ToList();
@@ -106,10 +101,10 @@ namespace GrafikWPF
                 }
             }
 
-            var niekompletnyWpis = _wszyscyLekarze.FirstOrDefault(l => l.IsAktywny && (string.IsNullOrWhiteSpace(l.Imie) || string.IsNullOrWhiteSpace(l.Nazwisko) || string.IsNullOrWhiteSpace(l.Symbol)));
+            var niekompletnyWpis = _wszyscyLekarze.FirstOrDefault(l => l.IsAktywny && !l.IsUkryty && (string.IsNullOrWhiteSpace(l.Imie) || string.IsNullOrWhiteSpace(l.Nazwisko) || string.IsNullOrWhiteSpace(l.Symbol)));
             if (niekompletnyWpis != null)
             {
-                MessageBox.Show("Uzupełnij wszystkie dane (Imię, Nazwisko, Symbol) dla aktywnych lekarzy lub usuń pusty wiersz.", "Niekompletne Dane", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show("Uzupełnij wszystkie dane (Imię, Nazwisko, Symbol) dla aktywnych dyżurnych lub usuń pusty wiersz.", "Niekompletne Dane", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
@@ -128,7 +123,8 @@ namespace GrafikWPF
             var pustyLekarz = _wszyscyLekarze.FirstOrDefault(l =>
                 string.IsNullOrWhiteSpace(l.Imie) &&
                 string.IsNullOrWhiteSpace(l.Nazwisko) &&
-                string.IsNullOrWhiteSpace(l.Symbol));
+                string.IsNullOrWhiteSpace(l.Symbol) &&
+                !l.IsUkryty);
 
             if (pustyLekarz != null)
             {
@@ -141,9 +137,9 @@ namespace GrafikWPF
                 return;
             }
 
-            if (_wszyscyLekarze.Count(l => l.IsAktywny) >= MAKS_AKTYWNYCH_LEKARZY)
+            if (_wszyscyLekarze.Count(l => l.IsAktywny && !l.IsUkryty) >= MAKS_AKTYWNYCH_LEKARZY)
             {
-                MessageBox.Show($"Osiągnięto maksymalny limit {MAKS_AKTYWNYCH_LEKARZY} aktywnych lekarzy. Aby dodać nowego, najpierw usuń (zarchiwizuj) kogoś z listy.", "Limit Osiągnięty", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show($"Osiągnięto maksymalny limit {MAKS_AKTYWNYCH_LEKARZY} aktywnych dyżurnych. Aby dodać nowego, najpierw usuń (zarchiwizuj) kogoś z listy.", "Limit Osiągnięty", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
 
@@ -166,7 +162,7 @@ namespace GrafikWPF
         {
             if ((sender as FrameworkElement)?.DataContext is Lekarz lekarz)
             {
-                var wynik = MessageBox.Show($"Czy na pewno chcesz usunąć lekarza: {lekarz.PelneImie}? Dane zostaną zarchiwizowane i będzie można je przywrócić.", "Potwierdzenie usunięcia", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                var wynik = MessageBox.Show($"Czy na pewno chcesz usunąć dyżurnego: {lekarz.PelneImie}? Dyżurny zostanie zarchiwizowany i nie będzie już brany pod uwagę w przyszłych grafikach. Dane archiwalne pozostaną nienaruszone. Będzie można go przywrócić w dowolnym momencie.", "Potwierdzenie usunięcia", MessageBoxButton.YesNo, MessageBoxImage.Warning);
                 if (wynik == MessageBoxResult.Yes)
                 {
                     lekarz.IsAktywny = false;
@@ -179,9 +175,9 @@ namespace GrafikWPF
         {
             if ((sender as FrameworkElement)?.DataContext is Lekarz lekarz)
             {
-                if (_wszyscyLekarze.Count(l => l.IsAktywny) >= MAKS_AKTYWNYCH_LEKARZY)
+                if (_wszyscyLekarze.Count(l => l.IsAktywny && !l.IsUkryty) >= MAKS_AKTYWNYCH_LEKARZY)
                 {
-                    MessageBox.Show($"Osiągnięto maksymalny limit {MAKS_AKTYWNYCH_LEKARZY} aktywnych lekarzy. Nie można przywrócić kolejnego.", "Limit Osiągnięty", MessageBoxButton.OK, MessageBoxImage.Information);
+                    MessageBox.Show($"Osiągnięto maksymalny limit {MAKS_AKTYWNYCH_LEKARZY} aktywnych dyżurnych. Aby przywrócić tego dyżurnego, należy najpierw usunąć (zarchiwizować) innego.", "Limit Osiągnięty", MessageBoxButton.OK, MessageBoxImage.Information);
                     return;
                 }
                 lekarz.IsAktywny = true;
@@ -193,10 +189,10 @@ namespace GrafikWPF
         {
             if ((sender as FrameworkElement)?.DataContext is Lekarz lekarz)
             {
-                var wynik = MessageBox.Show($"Czy na pewno chcesz TRWALE usunąć lekarza '{lekarz.PelneImie}' z archiwum?\n\nTa operacja jest NIEODWRACALNA.", "Potwierdzenie permanentnego usunięcia", MessageBoxButton.YesNo, MessageBoxImage.Exclamation);
+                var wynik = MessageBox.Show($"Czy na pewno chcesz TRWALE UKRYĆ dyżurnego '{lekarz.PelneImie}' z listy?\n\nTa operacja jest NIEODWRACALNA. Dyżurny zniknie z widoku, ale jego dane archiwalne zostaną nienaruszone. Aby go ponownie użyć, musisz dodać go ręcznie od nowa.", "Potwierdzenie trwałego ukrycia", MessageBoxButton.YesNo, MessageBoxImage.Exclamation);
                 if (wynik == MessageBoxResult.Yes)
                 {
-                    _wszyscyLekarze.Remove(lekarz);
+                    lekarz.IsUkryty = true;
                     OdswiezWidokLekarzy();
                 }
             }
@@ -214,7 +210,7 @@ namespace GrafikWPF
                 if (textBox.Name == "NazwiskoTextBox" && string.IsNullOrWhiteSpace(lekarz.Symbol) && !string.IsNullOrWhiteSpace(lekarz.Nazwisko) && lekarz.Nazwisko.Length >= 3)
                 {
                     string potencjalnySymbol = lekarz.Nazwisko.Substring(0, 3).ToUpper();
-                    bool duplikatSymbolu = _wszyscyLekarze.Any(l => l != lekarz && l.Symbol == potencjalnySymbol);
+                    bool duplikatSymbolu = _wszyscyLekarze.Any(l => l != lekarz && !l.IsUkryty && l.Symbol == potencjalnySymbol);
                     if (!duplikatSymbolu)
                     {
                         lekarz.Symbol = potencjalnySymbol;

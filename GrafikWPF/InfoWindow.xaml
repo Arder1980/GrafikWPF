@@ -19,8 +19,7 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0" FontSize="22" FontWeight="Bold" Text="Grafik Optymalny"/>
-
+        <TextBlock Grid.Row="0" FontSize="22" FontWeight="Bold" Text="Grafikomat dyżurowy"/>
         <TextBlock Grid.Row="1" Margin="0,5,0,15" LineHeight="20" TextWrapping="Wrap">
             <Run FontWeight="Bold">Wersja programu:</Run> 1.0<LineBreak/>
             <Run FontWeight="Bold">Koncepcja, funkcjonalność i projekt UI:</Run> Adam Lemanowicz<LineBreak/>

@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-
-namespace GrafikWPF
+﻿namespace GrafikWPF
 {
     public class GrafikWejsciowy
     {

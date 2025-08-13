@@ -1,30 +1,19 @@
-﻿using System.Collections.Generic;
-using System.Linq;
-
-namespace GrafikWPF
+﻿namespace GrafikWPF
 {
     public class DaneAplikacji
     {
-        /// <summary>
-        /// Kompletna lista wszystkich lekarzy, zarówno aktywnych, jak i archiwalnych.
-        /// </summary>
+        public string NazwaOddzialu { get; set; } = "Zakład Diagnostyki Obrazowej";
+        public string NazwaSzpitala { get; set; } = "Szpital Kliniczny im. dr. Emila Warmińskiego Politechniki Bydgoskiej";
+
         public List<Lekarz> WszyscyLekarze { get; set; } = new();
 
-        /// <summary>
-        /// Słownik przechowujący dane dla poszczególnych miesięcy.
-        /// Klucz jest w formacie "YYYY-MM" (np. "2025-08").
-        /// </summary>
         public Dictionary<string, DaneMiesiaca> DaneGrafikow { get; set; } = new();
 
-        /// <summary>
-        /// Przechowuje ustawioną przez użytkownika kolejność priorytetów dla algorytmu Solver'a.
-        /// </summary>
         public List<SolverPriority> KolejnoscPriorytetowSolvera { get; set; } = new();
 
+        public SolverType WybranyAlgorytm { get; set; } = SolverType.Backtracking;
 
-        /// <summary>
-        /// Metoda zapewniająca, że lista priorytetów nie jest pusta i ma domyślną, sensowną kolejność.
-        /// </summary>
+
         public void InicjalizujPriorytety()
         {
             if (KolejnoscPriorytetowSolvera == null || !KolejnoscPriorytetowSolvera.Any())
@@ -33,9 +22,8 @@ namespace GrafikWPF
                 {
                     SolverPriority.CiagloscPoczatkowa,
                     SolverPriority.LacznaLiczbaObsadzonychDni,
-                    SolverPriority.ZrealizowaneBardzoChce,
-                    SolverPriority.ZrealizowaneChce,
-                    SolverPriority.RownomiernoscObciazenia
+                    SolverPriority.SprawiedliwoscObciazenia,
+                    SolverPriority.RownomiernoscRozlozenia
                 };
             }
         }

@@ -1,0 +1,246 @@
+{
+  "Przypisania": {
+    "2025-01-01T00:00:00": {
+      "Symbol": "L02",
+      "Imie": "Imie2",
+      "Nazwisko": "Nazwisko2",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-02T00:00:00": {
+      "Symbol": "L01",
+      "Imie": "Imie1",
+      "Nazwisko": "Nazwisko1",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-03T00:00:00": {
+      "Symbol": "L03",
+      "Imie": "Imie3",
+      "Nazwisko": "Nazwisko3",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-04T00:00:00": {
+      "Symbol": "L05",
+      "Imie": "Imie5",
+      "Nazwisko": "Nazwisko5",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-05T00:00:00": {
+      "Symbol": "L06",
+      "Imie": "Imie6",
+      "Nazwisko": "Nazwisko6",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-06T00:00:00": {
+      "Symbol": "L04",
+      "Imie": "Imie4",
+      "Nazwisko": "Nazwisko4",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-07T00:00:00": {
+      "Symbol": "L07",
+      "Imie": "Imie7",
+      "Nazwisko": "Nazwisko7",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-08T00:00:00": {
+      "Symbol": "L08",
+      "Imie": "Imie8",
+      "Nazwisko": "Nazwisko8",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-09T00:00:00": {
+      "Symbol": "L09",
+      "Imie": "Imie9",
+      "Nazwisko": "Nazwisko9",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-10T00:00:00": {
+      "Symbol": "L11",
+      "Imie": "Imie11",
+      "Nazwisko": "Nazwisko11",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-11T00:00:00": {
+      "Symbol": "L12",
+      "Imie": "Imie12",
+      "Nazwisko": "Nazwisko12",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-12T00:00:00": {
+      "Symbol": "L10",
+      "Imie": "Imie10",
+      "Nazwisko": "Nazwisko10",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-13T00:00:00": {
+      "Symbol": "L13",
+      "Imie": "Imie13",
+      "Nazwisko": "Nazwisko13",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-14T00:00:00": {
+      "Symbol": "L14",
+      "Imie": "Imie14",
+      "Nazwisko": "Nazwisko14",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-15T00:00:00": {
+      "Symbol": "L16",
+      "Imie": "Imie16",
+      "Nazwisko": "Nazwisko16",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-16T00:00:00": {
+      "Symbol": "L15",
+      "Imie": "Imie15",
+      "Nazwisko": "Nazwisko15",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-17T00:00:00": {
+      "Symbol": "L17",
+      "Imie": "Imie17",
+      "Nazwisko": "Nazwisko17",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-18T00:00:00": {
+      "Symbol": "L18",
+      "Imie": "Imie18",
+      "Nazwisko": "Nazwisko18",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-19T00:00:00": {
+      "Symbol": "L19",
+      "Imie": "Imie19",
+      "Nazwisko": "Nazwisko19",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-20T00:00:00": {
+      "Symbol": "L20",
+      "Imie": "Imie20",
+      "Nazwisko": "Nazwisko20",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-21T00:00:00": {
+      "Symbol": "L02",
+      "Imie": "Imie2",
+      "Nazwisko": "Nazwisko2",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-22T00:00:00": {
+      "Symbol": "L01",
+      "Imie": "Imie1",
+      "Nazwisko": "Nazwisko1",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-23T00:00:00": {
+      "Symbol": "L03",
+      "Imie": "Imie3",
+      "Nazwisko": "Nazwisko3",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-24T00:00:00": {
+      "Symbol": "L05",
+      "Imie": "Imie5",
+      "Nazwisko": "Nazwisko5",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-25T00:00:00": {
+      "Symbol": "L04",
+      "Imie": "Imie4",
+      "Nazwisko": "Nazwisko4",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-26T00:00:00": {
+      "Symbol": "L07",
+      "Imie": "Imie7",
+      "Nazwisko": "Nazwisko7",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-27T00:00:00": {
+      "Symbol": "L08",
+      "Imie": "Imie8",
+      "Nazwisko": "Nazwisko8",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-28T00:00:00": {
+      "Symbol": "L11",
+      "Imie": "Imie11",
+      "Nazwisko": "Nazwisko11",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-29T00:00:00": {
+      "Symbol": "L10",
+      "Imie": "Imie10",
+      "Nazwisko": "Nazwisko10",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-30T00:00:00": {
+      "Symbol": "L13",
+      "Imie": "Imie13",
+      "Nazwisko": "Nazwisko13",
+      "IsAktywny": true,
+      "IsUkryty": false
+    },
+    "2025-01-31T00:00:00": {
+      "Symbol": "L14",
+      "Imie": "Imie14",
+      "Nazwisko": "Nazwisko14",
+      "IsAktywny": true,
+      "IsUkryty": false
+    }
+  },
+  "DlugoscCiaguPoczatkowego": 31,
+  "WskaznikRownomiernosci": 11.60437085336828,
+  "WskaznikRozlozeniaDyzurow": 0.0,
+  "FinalneOblozenieLekarzy": {
+    "L01": 2,
+    "L02": 2,
+    "L03": 2,
+    "L04": 2,
+    "L05": 2,
+    "L06": 1,
+    "L07": 2,
+    "L08": 2,
+    "L09": 1,
+    "L10": 2,
+    "L11": 2,
+    "L12": 1,
+    "L13": 2,
+    "L14": 2,
+    "L15": 1,
+    "L16": 1,
+    "L17": 1,
+    "L18": 1,
+    "L19": 1,
+    "L20": 1
+  }
+}

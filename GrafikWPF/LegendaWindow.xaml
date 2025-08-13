@@ -4,7 +4,7 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
-        Title="Wyjaśnienie statusów"
+        Title="Wyjaśnienie deklaracji"
         Width="600"
         SizeToContent="Height"
         WindowStartupLocation="CenterOwner"
@@ -20,20 +20,29 @@
 
         <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
             <TextBlock TextWrapping="Wrap" LineHeight="20">
-                <TextBlock FontWeight="Bold" FontSize="16">Dostępność lekarzy</TextBlock>
+                <TextBlock FontWeight="Bold" FontSize="16">Dostępność i deklaracje dyżurnych</TextBlock>
                 <LineBreak/><LineBreak/>
-                <Run>Poniższe statusy określają dostępność i preferencje lekarza co do dyżuru w danym dniu. Algorytm używa ich do znalezienia optymalnego grafiku.</Run>
+                <Run>Poniższe deklaracje określają dostępność i preferencje lekarza co do dyżuru w danym dniu. Algorytm używa ich do znalezienia optymalnego grafiku.</Run>
                 <LineBreak/><LineBreak/>
 
-                <TextBlock FontWeight="Bold" FontSize="14" Foreground="#006400">Statusy pozytywne (chęć podjęcia dyżuru)</TextBlock>
+                <TextBlock FontWeight="Bold" FontSize="14" Foreground="#006400">Deklaracje pozytywne (chęć podjęcia dyżuru)</TextBlock>
 
                 <Grid Margin="20,10,0,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="📌" Margin="0,0,15,0" FontSize="14" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"><Run FontWeight="Bold">Rezerwacja:</Run> Najwyższy możliwy priorytet. Oznacza, że lekarz bezwzględnie musi otrzymać dyżur w tym dniu, o ile nie łamie to twardych reguł (np. limitu dyżurów). Żaden inny kandydat nie będzie w tym dniu rozpatrywany.</TextBlock>
+                </Grid>
+                
+                <Grid Margin="20,10,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="✅" Margin="0,0,15,0" FontSize="14" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"><Run FontWeight="Bold">Bardzo chcę:</Run> Najwyższy możliwy priorytet. Status ten ignoruje ograniczenia dyżuru dzień po dniu oraz w sąsiedztwie "Innego dyżuru".</TextBlock>
+                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"><Run FontWeight="Bold">Bardzo chcę:</Run> Wysoki priorytet. Deklaracja ta jako jedyna ignoruje ograniczenia dyżuru dzień po dniu oraz w sąsiedztwie "Innego dyżuru".</TextBlock>
                 </Grid>
 
                 <Grid Margin="20,10,0,0">
@@ -42,7 +51,7 @@
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="👍" Margin="0,0,15,0" FontSize="14" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"><Run FontWeight="Bold">Chcę:</Run> Wysoki priorytet. Lekarz z tym statusem będzie brany pod uwagę przed lekarzem, który tylko "Może".</TextBlock>
+                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"><Run FontWeight="Bold">Chcę:</Run> Wyższy priorytet. Lekarz z tą deklaracją będzie brany pod uwagę przed lekarzem, który tylko "Może".</TextBlock>
                 </Grid>
 
                 <Grid Margin="20,10,0,0">
@@ -51,11 +60,11 @@
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="🆗" Margin="0,0,15,0" FontSize="14" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"><Run FontWeight="Bold">Mogę:</Run> Status neutralny, standardowa dostępność.</TextBlock>
+                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"><Run FontWeight="Bold">Mogę:</Run> Deklaracja neutralna, standardowa dostępność.</TextBlock>
                 </Grid>
                 
                 <LineBreak/><LineBreak/>
-                <TextBlock FontWeight="Bold" FontSize="14" Foreground="#b22222">Statusy z ograniczeniami lub negatywne</TextBlock>
+                <TextBlock FontWeight="Bold" FontSize="14" Foreground="#b22222">Deklaracje z ograniczeniami lub negatywne</TextBlock>
 
                 <Grid Margin="20,10,0,0">
                     <Grid.ColumnDefinitions>
@@ -63,7 +72,7 @@
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="⚠️" Margin="0,0,15,0" FontSize="14" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"><Run FontWeight="Bold">Mogę warunkowo:</Run> Status specjalny. Lekarzowi w ciągu miesiąca zostanie przydzielony co najwyżej jeden dyżur spośród wszystkich dni oznaczonych w ten sposób.</TextBlock>
+                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"><Run FontWeight="Bold">Mogę warunkowo:</Run> Deklaracja specjalna. Lekarzowi w ciągu miesiąca zostanie przydzielony co najwyżej jeden dyżur spośród wszystkich dni oznaczonych w ten sposób.</TextBlock>
                 </Grid>
 
                 <Grid Margin="20,10,0,0">
@@ -72,7 +81,7 @@
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="🏥" Margin="0,0,15,0" FontSize="14" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"><Run FontWeight="Bold">Inny dyżur:</Run> Oznacza dyżur w innym miejscu. Blokuje możliwość przydziału dyżuru w dniu poprzedzającym i następującym (chyba że występuje tam status "Bardzo chcę").</TextBlock>
+                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"><Run FontWeight="Bold">Inny dyżur:</Run> Oznacza dyżur w innym miejscu. Blokuje możliwość przydziału dyżuru w dniu poprzedzającym i następującym (chyba że występuje tam deklaracja "Bardzo chcę").</TextBlock>
                 </Grid>
 
                 <Grid Margin="20,10,0,0">
@@ -90,7 +99,7 @@
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="❌" Margin="0,0,15,0" FontSize="14" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"><Run FontWeight="Bold">Niedostępny (---):</Run> Lekarz jest całkowicie niedostępny. Domyślny status dla każdego dnia.</TextBlock>
+                    <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"><Run FontWeight="Bold">Niedostępny (---):</Run> Lekarz jest całkowicie niedostępny. Domyślna deklaracja dla każdego dnia.</TextBlock>
                 </Grid>
             </TextBlock>
         </ScrollViewer>

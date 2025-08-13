@@ -33,6 +33,13 @@ namespace GrafikWPF
             set { _isAktywny = value; OnPropertyChanged(); }
         }
 
+        private bool _isUkryty = false;
+        public bool IsUkryty
+        {
+            get => _isUkryty;
+            set { _isUkryty = value; OnPropertyChanged(); }
+        }
+
         public string PelneImie => $"{Imie} {Nazwisko}";
 
         public Lekarz() { }
@@ -43,6 +50,7 @@ namespace GrafikWPF
             _imie = imie;
             _nazwisko = nazwisko;
             _isAktywny = isAktywny;
+            _isUkryty = false;
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;

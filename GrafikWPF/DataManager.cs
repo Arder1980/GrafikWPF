@@ -1,6 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
+﻿using System.IO;
 using System.Text.Json;
 using System.Windows;
 
@@ -36,22 +34,29 @@ namespace GrafikWPF
                 }
                 else if (File.Exists(_backupFilePath))
                 {
-                    // Jeśli główny plik nie istnieje, ale istnieje backup, spróbuj go użyć
                     string jsonString = File.ReadAllText(_backupFilePath);
                     AppData = JsonSerializer.Deserialize<DaneAplikacji>(jsonString) ?? new DaneAplikacji();
                     MessageBox.Show("Nie znaleziono głównego pliku danych. Wczytano dane z kopii zapasowej.", "Informacja", MessageBoxButton.OK, MessageBoxImage.Information);
                 }
 
-                // Jeśli po wszystkich próbach dane są puste, zainicjuj domyślnymi wartościami
                 if (AppData.WszyscyLekarze == null || AppData.WszyscyLekarze.Count == 0)
                 {
                     InitializeDefaultData();
                 }
+
+                // Czyszczenie priorytetów z nieaktualnych wartości
+                var aktualnePriorytety = Enum.GetValues(typeof(SolverPriority)).Cast<SolverPriority>();
+                AppData.KolejnoscPriorytetowSolvera = AppData.KolejnoscPriorytetowSolvera
+                                                        .Where(p => aktualnePriorytety.Contains(p))
+                                                        .ToList();
+
+                AppData.InicjalizujPriorytety();
             }
             catch (Exception ex)
             {
                 MessageBox.Show($"Wystąpił krytyczny błąd podczas wczytywania danych: {ex.Message}\nAplikacja spróbuje użyć danych domyślnych.", "Błąd wczytywania", MessageBoxButton.OK, MessageBoxImage.Error);
                 InitializeDefaultData();
+                AppData.InicjalizujPriorytety();
             }
         }
 
@@ -59,13 +64,11 @@ namespace GrafikWPF
         {
             try
             {
-                // 1. Stwórz kopię zapasową istniejącego pliku danych
                 if (File.Exists(_dataFilePath))
                 {
                     File.Copy(_dataFilePath, _backupFilePath, true);
                 }
 
-                // 2. Zapisz aktualny stan do głównego pliku
                 string jsonString = JsonSerializer.Serialize(AppData, _jsonOptions);
                 File.WriteAllText(_dataFilePath, jsonString);
             }

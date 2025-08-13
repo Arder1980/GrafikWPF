@@ -6,7 +6,6 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Windows;
-using System.Windows.Controls;
 
 namespace GrafikWPF
 {
@@ -131,9 +130,8 @@ namespace GrafikWPF
             {
                 SolverPriority.CiagloscPoczatkowa,
                 SolverPriority.LacznaLiczbaObsadzonychDni,
-                SolverPriority.ZrealizowaneBardzoChce,
-                SolverPriority.ZrealizowaneChce,
-                SolverPriority.RownomiernoscObciazenia
+                SolverPriority.SprawiedliwoscObciazenia,
+                SolverPriority.RownomiernoscRozlozenia
             };
             LoadPriorities(defaultOrder);
             UpdateItemNames();
@@ -160,12 +158,10 @@ namespace GrafikWPF
                     return "Cel: zapewnienie jak najdłuższej nieprzerwanej obsady dyżurów od początku miesiąca.";
                 case SolverPriority.LacznaLiczbaObsadzonychDni:
                     return "Cel: zapewnienie jak największej liczby obsadzonych dyżurów w całym miesiącu.";
-                case SolverPriority.ZrealizowaneBardzoChce:
-                    return "Cel: przydzielenie jak największej liczby dyżurów o statusie 'Bardzo chcę'.";
-                case SolverPriority.ZrealizowaneChce:
-                    return "Cel: przydzielenie jak największej liczby dyżurów o statusie 'Chcę'.";
-                case SolverPriority.RownomiernoscObciazenia:
-                    return "Cel: jak najbardziej sprawiedliwy i proporcjonalny podział dyżurów między lekarzy.";
+                case SolverPriority.SprawiedliwoscObciazenia:
+                    return "Cel: jak najbardziej sprawiedliwy podział dyżurów, proporcjonalny do zadeklarowanych przez lekarzy limitów.";
+                case SolverPriority.RownomiernoscRozlozenia:
+                    return "Cel: jak najbardziej regularne rozłożenie dyżurów danego lekarza w czasie (unikanie grupowania dyżurów jednej osoby w krótkim okresie czasu).";
                 default:
                     return "";
             }

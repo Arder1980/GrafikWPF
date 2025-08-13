@@ -1,0 +1,26 @@
+﻿<Window x:Class="GrafikWPF.TimeoutWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Przekroczono Limit Czasu" Height="220" Width="450"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize" ShowInTaskbar="False"
+        Background="LightGray">
+    <Grid Margin="15">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" FontSize="16" FontWeight="Bold" Text="Obliczenia Zostały Przerwane"/>
+        <TextBlock Grid.Row="1" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,10">
+            <Run>Operacja generowania grafiku została przerwana, ponieważ przekroczyła ustawiony limit 10 minut.</Run>
+            <LineBreak/><LineBreak/>
+            <Run>Problem może być zbyt złożony dla wybranego algorytmu. Zaleca się wybranie w ustawieniach innego, szybszego silnika (np. jednego z metaheurystycznych).</Run>
+        </TextBlock>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Zmień silnik obliczeniowy..." Click="ChangeAlgorithm_Click" Padding="10,5" Margin="0,0,10,0"/>
+            <Button Content="OK" IsDefault="True" IsCancel="True" Padding="10,5" MinWidth="80"/>
+        </StackPanel>
+    </Grid>
+</Window>

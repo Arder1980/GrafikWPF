@@ -1,0 +1,186 @@
+﻿<Window x:Class="GrafikWPF.BenchmarkWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Porównanie czasu wykonania i zgodności generowanych grafików testowych z grafikami wzorcowymi dla różnych silników i scenariuszy"
+        Height="640" Width="1150"
+        MinWidth="980" MinHeight="520"
+        WindowStartupLocation="CenterOwner"
+        Background="LightGray"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True">
+
+    <Window.Resources>
+        <SolidColorBrush x:Key="HdrBg" Color="#4F4F4F"/>
+        <SolidColorBrush x:Key="HdrFg" Color="#FFFFFF"/>
+        <SolidColorBrush x:Key="GridLine" Color="#B0B0B0"/>
+        <SolidColorBrush x:Key="Row0" Color="#FFFFFFFF"/>
+        <SolidColorBrush x:Key="Row1" Color="#F2F2F2"/>
+        <Style x:Key="HeaderTitle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="20"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,0,6"/>
+        </Style>
+        <Style x:Key="CellBorder" TargetType="Border">
+            <Setter Property="BorderBrush" Value="{StaticResource GridLine}"/>
+            <Setter Property="BorderThickness" Value="0,0,1,1"/>
+            <Setter Property="Padding" Value="6,4"/>
+        </Style>
+        <Style x:Key="CellTextLeft" TargetType="TextBlock">
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+        </Style>
+        <Style x:Key="CellTextCenter" TargetType="TextBlock" BasedOn="{StaticResource CellTextLeft}">
+            <Setter Property="TextAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="15">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Benchmark wydajności i jakości silników" Style="{StaticResource HeaderTitle}"/>
+        <TextBlock Grid.Row="1" Text="Porównanie czasu wykonania i jakości wyników dla różnych silników i scenariuszy." TextWrapping="Wrap" Margin="0,0,0,10" HorizontalAlignment="Center" />
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,15">
+            <TextBlock Text="Profil optymalizacji:" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,10,0"/>
+            <ComboBox x:Name="PriorityProfileComboBox" Width="340" ItemsSource="{Binding PriorityProfiles}" SelectedValue="{Binding SelectedPriorityProfile}" DisplayMemberPath="Name"/>
+        </StackPanel>
+
+        <Grid Grid.Row="3">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <Border Grid.Row="0" BorderBrush="{StaticResource GridLine}" BorderThickness="1,1,1,0">
+                <Grid Background="{StaticResource HdrBg}" SnapsToDevicePixels="True">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="17"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid Grid.Column="0" Background="{StaticResource HdrBg}" MinHeight="36">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="1.6*"/>
+                            <ColumnDefinition Width="1.6*"/>
+                            <ColumnDefinition Width="3.0*"/>
+                            <ColumnDefinition Width="1.6*"/>
+                            <ColumnDefinition Width="1.3*"/>
+                            <ColumnDefinition Width="1.8*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <Border Grid.Column="0" BorderBrush="{StaticResource GridLine}" BorderThickness="0,0,1,1">
+                            <TextBlock Text="Silnik" Foreground="{StaticResource HdrFg}" FontWeight="Bold" VerticalAlignment="Center" Margin="8,0"/>
+                        </Border>
+                        <Border Grid.Column="1" BorderBrush="{StaticResource GridLine}" BorderThickness="0,0,1,1">
+                            <TextBlock Text="Scenariusz" Foreground="{StaticResource HdrFg}" FontWeight="Bold" VerticalAlignment="Center" TextAlignment="Center"/>
+                        </Border>
+                        <Border Grid.Column="2" BorderBrush="{StaticResource GridLine}" BorderThickness="0,0,1,1">
+                            <TextBlock Text="Postęp" Foreground="{StaticResource HdrFg}" FontWeight="Bold" VerticalAlignment="Center" TextAlignment="Center"/>
+                        </Border>
+                        <Border Grid.Column="3" BorderBrush="{StaticResource GridLine}" BorderThickness="0,0,1,1">
+                            <TextBlock Text="Status" Foreground="{StaticResource HdrFg}" FontWeight="Bold" VerticalAlignment="Center" TextAlignment="Center"/>
+                        </Border>
+                        <Border Grid.Column="4" BorderBrush="{StaticResource GridLine}" BorderThickness="0,0,1,1">
+                            <TextBlock Text="Czas generowania grafiku (ms)" TextWrapping="Wrap" Foreground="{StaticResource HdrFg}" FontWeight="Bold" VerticalAlignment="Center" TextAlignment="Center" Margin="4,0" LineHeight="14"/>
+                        </Border>
+                        <Border Grid.Column="5" BorderBrush="{StaticResource GridLine}" BorderThickness="0,0,0,1">
+                            <TextBlock Text="Zgodność z grafikiem wzorcowym (%)" TextWrapping="Wrap" Foreground="{StaticResource HdrFg}" FontWeight="Bold" VerticalAlignment="Center" TextAlignment="Center" Margin="4,0" LineHeight="14"/>
+                        </Border>
+                    </Grid>
+                    <Border Grid.Column="1" Background="{StaticResource HdrBg}"/>
+                </Grid>
+            </Border>
+
+            <Border Grid.Row="1" BorderBrush="{StaticResource GridLine}" BorderThickness="1,0,1,1" Background="White">
+                <ScrollViewer x:Name="RowsScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="True">
+                    <ItemsControl x:Name="BenchmarkItemsControl" ItemsSource="{Binding Results}" AlternationCount="2">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border MinHeight="44">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="Background" Value="{StaticResource Row0}"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Value="1">
+                                                    <DataTrigger.Binding>
+                                                        <Binding RelativeSource="{RelativeSource AncestorType=ContentPresenter}" Path="(ItemsControl.AlternationIndex)"/>
+                                                    </DataTrigger.Binding>
+                                                    <Setter Property="Background" Value="{StaticResource Row1}"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="1.6*"/>
+                                            <ColumnDefinition Width="1.6*"/>
+                                            <ColumnDefinition Width="3.0*"/>
+                                            <ColumnDefinition Width="1.6*"/>
+                                            <ColumnDefinition Width="1.3*"/>
+                                            <ColumnDefinition Width="1.8*"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <Border Grid.Column="0" Style="{StaticResource CellBorder}">
+                                            <TextBlock Text="{Binding EngineName}" Style="{StaticResource CellTextLeft}"/>
+                                        </Border>
+                                        <Border Grid.Column="1" Style="{StaticResource CellBorder}">
+                                            <TextBlock Text="{Binding TestCaseName}" Style="{StaticResource CellTextCenter}"/>
+                                        </Border>
+                                        <Border Grid.Column="2" Style="{StaticResource CellBorder}">
+                                            <Grid>
+                                                <ProgressBar Minimum="0" Maximum="100" Height="18" HorizontalAlignment="Stretch" Margin="10,0" Value="{Binding Progress}"/>
+                                            </Grid>
+                                        </Border>
+                                        <Border Grid.Column="3" Style="{StaticResource CellBorder}">
+                                            <StackPanel VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Status}" Style="{StaticResource CellTextCenter}"/>
+                                                <TextBlock Margin="0,2,0,0" FontSize="11" Opacity="0.8" TextAlignment="Center">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Setter Property="Text" Value="{Binding TimeRemaining}"/>
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding TimeRemaining}" Value="">
+                                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                            </StackPanel>
+                                        </Border>
+                                        <Border Grid.Column="4" Style="{StaticResource CellBorder}">
+                                            <TextBlock Text="{Binding ExecutionTime}" Style="{StaticResource CellTextCenter}"/>
+                                        </Border>
+                                        <Border Grid.Column="5" Style="{StaticResource CellBorder}">
+                                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                                                <TextBlock Text="{Binding QualityScore}" Style="{StaticResource CellTextCenter}" FontWeight="Bold"/>
+                                                <TextBlock Text="{Binding QualityScoreDetails}" FontSize="11" Opacity="0.8" HorizontalAlignment="Center"/>
+                                            </StackPanel>
+                                        </Border>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Border>
+        </Grid>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button x:Name="ExportButton" Content="Eksportuj wyniki..." Click="ExportButton_Click" Margin="0,0,20,0" IsEnabled="False"/>
+            <Button x:Name="StartButton" Content="Uruchom Testy" Click="StartButton_Click" Padding="10,5" Margin="0,0,10,0"/>
+            <Button Content="Zamknij" IsCancel="True" Padding="10,5"/>
+        </StackPanel>
+    </Grid>
+</Window>

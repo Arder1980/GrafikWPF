@@ -167,7 +167,7 @@
 
             <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Content="Zapisz i Zamknij" IsDefault="True" Click="Zapisz_Click" Margin="0,0,10,0" Padding="10,5"/>
-                <Button Content="Anuluj" IsCancel="True" Click="Anuluj_Click" Padding="10,5"/>
+                <Button Content="Anuluj" IsCancel="True" Padding="10,5"/>
             </StackPanel>
         </Grid>
     </Grid>

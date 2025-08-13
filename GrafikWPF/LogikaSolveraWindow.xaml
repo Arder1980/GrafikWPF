@@ -4,7 +4,7 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
-        Title="Logika Algorytmu Układania Grafiku"
+        Title="Logika i Strategia Działania"
         Width="650"
         SizeToContent="Height"
         WindowStartupLocation="CenterOwner"
@@ -20,78 +20,75 @@
 
         <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
             <TextBlock TextWrapping="Wrap" LineHeight="20" TextAlignment="Justify">
-                <TextBlock FontWeight="Bold" FontSize="16">Jak działa algorytm optymalizujący?</TextBlock>
+                <TextBlock FontWeight="Bold" FontSize="16">Jak działa program?</TextBlock>
                 <LineBreak/><LineBreak/>
                 <Run>
-                    Silnik aplikacji (GrafikSolver) jest algorytmem obliczeniowym, którego zadaniem jest znalezienie jednego, możliwie najlepszego grafiku, bazując na wprowadzonych przez Ciebie dostępnościach i ograniczeniach. Proces ten jest realizowany przez algorytm rekurencyjny z nawrotami (backtracking), który systematycznie przeszukuje drzewo możliwych rozwiązań.
+                    Problem optymalnego ułożenia grafiku dyżurów jest wysoce złożonym zagadnieniem. Ilość możliwych kombinacji rośnie astronomicznie z każdym kolejnym lekarzem i dniem, uniemożliwiając ich pełne sprawdzenie. Program podchodzi do tego problemu w sposób strategiczny.
                 </Run>                
                 <LineBreak/><LineBreak/>
-                <TextBlock FontWeight="Bold" FontSize="14">Hierarchia priorytetów</TextBlock>
+                
+                <TextBlock FontWeight="Bold" FontSize="14">1. Cel: Czym jest "optymalny" grafik?</TextBlock>
                 <LineBreak/>
                 <Run>
-                    Gdy algorytm znajdzie w pełni ułożony grafik, porównuje go z najlepszym dotychczas znalezionym grafikiem. O tym, który grafik jest "lepszy", decyduje ściśle określona hierarchia celów. Nowy grafik zastąpi stary tylko wtedy, gdy wygra na pierwszym (najważniejszym) poziomie porównania. Jeśli jest remis, sprawdzany jest kolejny poziom, i tak dalej.
+                    To Ty decydujesz, co jest najważniejsze. W oknie "Kolejność priorytetów" układasz cele (np. ciągłość obsady, sprawiedliwość obciążenia) od najważniejszego do najmniej istotnego. Algorytm zawsze będzie dążył do maksymalizacji celu o wyższym priorytecie, traktując kolejne jako kryteria rozstrzygające w przypadku remisu.
                 </Run>
                 <LineBreak/><LineBreak/>
-                <Run FontWeight="Bold">P1: Maksymalna ciągłość obsady na początku miesiąca.</Run>
-                <Run>
-                    Najważniejszym celem jest zapewnienie nieprzerwanej obsady dyżurowej od pierwszego dnia miesiąca. Grafik, który ma obsadzone pierwsze 15 dni bez przerwy, zawsze będzie lepszy od grafiku, który ma obsadzone łącznie 25 dni, ale z przerwą (brakiem obsady) np. dnia trzeciego.
-                </Run>
-                <LineBreak/><LineBreak/>
-                <Run FontWeight="Bold">P2: Maksymalna łączna liczba obsadzonych dni.</Run>
-                <Run>
-                    Jeśli dwa grafiki mają taką samą ciągłość początkową (np. oba mają luki dopiero 16. dnia), wygrywa ten, który ma więcej obsadzonych dyżurów w całym miesiącu.
-                </Run>
-                <LineBreak/><LineBreak/>
-                <Run FontWeight="Bold">P3: Maksymalizacja zrealizowanych "Bardzo chcę".</Run>
-                <Run>
-                    Przy remisie na poprzednich poziomach, preferowany jest grafik, w którym więcej dyżurów przydzielono lekarzom ze statusem "Bardzo chcę".
-                </Run>
-                <LineBreak/><LineBreak/>
-                <Run FontWeight="Bold">P4: Maksymalizacja zrealizowanych "Chcę".</Run>
-                <Run>
-                    W przypadku kolejnego remisu, wygrywa grafik realizujący więcej dyżurów ze statusem "Chcę".
-                </Run>
-                <LineBreak/><LineBreak/>
-                <Run FontWeight="Bold">P5: Równomierne obciążenie lekarzy.</Run>
-                <Run>
-                    Ostatecznym kryterium, przy remisie na wszystkich powyższych poziomach, jest jak najbardziej sprawiedliwy (proporcjonalny) podział dyżurów. Algorytm preferuje grafik, w którym procentowe wypełnienie limitu dyżurów jest jak najbardziej zbliżone dla wszystkich lekarzy. Miarą jest tu jak najniższe odchylenie standardowe tych wartości.
-                </Run>
-                <LineBreak/><LineBreak/>
-                <TextBlock FontWeight="Bold" FontSize="14">Twarde zasady (ograniczenia)</TextBlock>
+
+                <TextBlock FontWeight="Bold" FontSize="14">2. Narzędzia: Jak szukamy rozwiązania?</TextBlock>
                 <LineBreak/>
                 <Run>
-                    Podczas budowania grafiku, algorytm bezwzględnie przestrzega następujących reguł dla każdego dnia:
+                    Program posiada zestaw wyspecjalizowanych "silników" (algorytmów), z których każdy ma inną strategię działania. Wyboru dokonujesz w oknie "Wybór algorytmu". Można je porównać do różnych metod dotarcia na szczyt góry:
                 </Run>
                 <LineBreak/>
                 <BulletDecorator Margin="20,5,0,0">
                     <BulletDecorator.Bullet>
                         <TextBlock Text="•" Margin="0,0,10,0"/>
                     </BulletDecorator.Bullet>
-                    <TextBlock TextWrapping="Wrap"><Run FontWeight="Bold">Limit dyżurów:</Run> Lekarz nie zostanie przypisany do dyżuru, jeśli osiągnął już swój maksymalny limit.</TextBlock>
+                    <TextBlock TextWrapping="Wrap"><Run FontWeight="Bold">Silniki Gwarantujące Optimum</Run> (np. Backtracking, AStar): Działają jak detektyw z kompletną mapą – metodycznie sprawdzają wszystkie obiecujące ścieżki. Dają gwarancję znalezienia absolutnie najlepszego możliwego wyniku, ale dla złożonych problemów ich praca może trwać bardzo długo.</TextBlock>
                 </BulletDecorator>
                 <BulletDecorator Margin="20,5,0,0">
                     <BulletDecorator.Bullet>
                         <TextBlock Text="•" Margin="0,0,10,0"/>
                     </BulletDecorator.Bullet>
-                    <TextBlock TextWrapping="Wrap"><Run FontWeight="Bold">Dostępność:</Run> Lekarz nie może dyżurować w dniu oznaczonym jako "---", "Urlop" lub "Inny dyżur".</TextBlock>
+                    <TextBlock TextWrapping="Wrap"><Run FontWeight="Bold">Silniki Metaheurystyczne</Run> (np. Genetic, AntColony): Działają jak doświadczony strateg – nie analizują każdej możliwości, ale używają inteligentnych technik, by bardzo szybko znaleźć rozwiązanie bliskie ideału. Są idealne dla skomplikowanych grafików pod presją czasu.</TextBlock>
+                </BulletDecorator>
+                <LineBreak/><LineBreak/>
+
+                <TextBlock FontWeight="Bold" FontSize="14">3. Fundament: Nienaruszalne reguły</TextBlock>
+                <LineBreak/>
+                <Run>
+                    Niezależnie od wybranych priorytetów i silnika, program zawsze i bezwzględnie przestrzega następujących "twardych" zasad:
+                </Run>
+                <LineBreak/>
+                <BulletDecorator Margin="20,5,0,0">
+                    <BulletDecorator.Bullet>
+                        <TextBlock Text="•" Margin="0,0,10,0"/>
+                    </BulletDecorator.Bullet>
+                    <TextBlock TextWrapping="Wrap"><Run FontWeight="Bold">Rezerwacje</Run> są przydzielane w pierwszej kolejności, zanim algorytm zacznie wypełniać resztę grafiku.</TextBlock>
                 </BulletDecorator>
                 <BulletDecorator Margin="20,5,0,0">
                     <BulletDecorator.Bullet>
                         <TextBlock Text="•" Margin="0,0,10,0"/>
                     </BulletDecorator.Bullet>
-                    <TextBlock TextWrapping="Wrap"><Run FontWeight="Bold">Odpoczynek:</Run> Lekarz nie może dyżurować dwa dni z rzędu. Wyjątkiem jest sytuacja, gdy na drugi dzień ma status "Bardzo chcę".</TextBlock>
+                    <TextBlock TextWrapping="Wrap">Lekarz nie może przekroczyć swojego <Run FontWeight="Bold">limitu dyżurów</Run>.</TextBlock>
                 </BulletDecorator>
                 <BulletDecorator Margin="20,5,0,0">
                     <BulletDecorator.Bullet>
                         <TextBlock Text="•" Margin="0,0,10,0"/>
                     </BulletDecorator.Bullet>
-                    <TextBlock TextWrapping="Wrap"><Run FontWeight="Bold">Kolizja z "Innym dyżurem":</Run> Jeśli lekarz ma "Inny dyżur" (np. w innym szpitalu), nie może mieć dyżuru w dniu poprzedzającym i następującym. Zasada ta jest ignorowana, jeśli na ten sąsiadujący dzień przypada status "Bardzo chcę".</TextBlock>
+                    <TextBlock TextWrapping="Wrap">Wymagany jest <Run FontWeight="Bold">odpoczynek</Run> (dyżur dzień po dniu jest zabroniony), chyba że na drugi dzień przypada deklaracja <Run FontWeight="Bold">"Bardzo chcę"</Run>.</TextBlock>
                 </BulletDecorator>
                 <BulletDecorator Margin="20,5,0,0">
                     <BulletDecorator.Bullet>
                         <TextBlock Text="•" Margin="0,0,10,0"/>
                     </BulletDecorator.Bullet>
-                    <TextBlock TextWrapping="Wrap"><Run FontWeight="Bold">Dyżur warunkowy:</Run> Lekarz może w całym miesiącu zrealizować tylko jeden dyżur ze statusem "Mogę warunkowo".</TextBlock>
+                    <TextBlock TextWrapping="Wrap">Dyżur nie może sąsiadować z <Run FontWeight="Bold">"Innym dyżurem"</Run> (chyba że występuje "Bardzo chcę").</TextBlock>
+                </BulletDecorator>
+                <BulletDecorator Margin="20,5,0,0">
+                    <BulletDecorator.Bullet>
+                        <TextBlock Text="•" Margin="0,0,10,0"/>
+                    </BulletDecorator.Bullet>
+                    <TextBlock TextWrapping="Wrap">Lekarz może wziąć tylko jeden dyżur z deklaracją <Run FontWeight="Bold">"Mogę warunkowo"</Run>.</TextBlock>
                 </BulletDecorator>
             </TextBlock>
         </ScrollViewer>

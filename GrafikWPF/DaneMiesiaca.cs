@@ -1,7 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-
-namespace GrafikWPF
+﻿namespace GrafikWPF
 {
     public class DaneMiesiaca
     {
@@ -22,5 +19,11 @@ namespace GrafikWPF
         /// Może być null, jeśli grafik nie został jeszcze wygenerowany lub zapisany.
         /// </summary>
         public RozwiazanyGrafik? ZapisanyGrafik { get; set; }
+
+        /// <summary>
+        /// Przechowuje "migawkę" symboli lekarzy, którzy byli aktywni 
+        /// w momencie pierwszego zapisu danych dla tego miesiąca.
+        /// </summary>
+        public List<string>? SymboleLekarzyAktywnychWMiesiacu { get; set; }
     }
 }

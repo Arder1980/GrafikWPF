@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:GrafikWPF"
         mc:Ignorable="d"
-        Title="Priorytety algorytmu" 
+        Title="Priorytety"
         SizeToContent="Height" Width="650"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
@@ -18,11 +18,15 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0" Text="Zarządzanie Priorytetami Algorytmu" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center"/>
-        <TextBlock Grid.Row="1" TextWrapping="Wrap" Margin="0,10,0,10" TextAlignment="Center">
-            Przesuwaj elementy na liście, aby ustalić ich ważność. Element na górze listy jest najważniejszy. Algorytm będzie traktował każdy kolejny priorytet jako kryterium rozstrzygające w przypadku remisu na wyższym poziomie.
-        </TextBlock>
-
+        <TextBlock Grid.Row="0" Text="Zarządzanie Priorytetami" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center"/>
+        <StackPanel Grid.Row="1" Margin="0,10,0,10">
+            <TextBlock Text="Przesuwaj elementy na liście, aby ustalić ich ważność. Element na górze listy jest najważniejszy." TextWrapping="Wrap" TextAlignment="Center"/>
+            <Separator Margin="0,10,0,5"/>
+            <TextBlock Text="Jak to działa?" FontWeight="Bold" TextAlignment="Center"/>
+            <TextBlock Margin="0,5,0,0" TextAlignment="Center" TextWrapping="Wrap">
+        <Run>Wyobraź sobie, że silnik obliczeniowy programu to menedżer, który musi wybrać lepszy z dwóch grafików. Najpierw zadaje najważniejsze pytanie: 'Który grafik jest lepszy pod kątem Priorytetu 1?'. Jeśli uzyska wyraźną odpowiedź, wybór jest dokonany. Jeśli oba grafiki są tak samo dobre, zadaje kolejne pytanie: 'A który jest lepszy pod kątem Priorytetu 2?'. Ten proces jest kontynuowany w dół listy, aż do znalezienia pierwszej różnicy, która rozstrzyga 'remis'.</Run>
+            </TextBlock>
+        </StackPanel>
         <Grid Grid.Row="2" Margin="0,10,0,10">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>

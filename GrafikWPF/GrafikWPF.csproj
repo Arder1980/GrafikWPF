@@ -9,6 +9,36 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Remove="BenchmarkStandards\optimal_large_continuity_coverage_fairness_spacing.json" />
+    <None Remove="BenchmarkStandards\optimal_large_coverage_fairness_spacing_continuity.json" />
+    <None Remove="BenchmarkStandards\optimal_large_fairness_spacing_continuity_coverage.json" />
+    <None Remove="BenchmarkStandards\optimal_large_spacing_continuity_coverage_fairness.json" />
+    <None Remove="BenchmarkStandards\optimal_medium_continuity_coverage_fairness_spacing.json" />
+    <None Remove="BenchmarkStandards\optimal_medium_coverage_fairness_spacing_continuity.json" />
+    <None Remove="BenchmarkStandards\optimal_medium_fairness_spacing_continuity_coverage.json" />
+    <None Remove="BenchmarkStandards\optimal_medium_spacing_continuity_coverage_fairness.json" />
+    <None Remove="BenchmarkStandards\optimal_small_continuity_coverage_fairness_spacing.json" />
+    <None Remove="BenchmarkStandards\optimal_small_coverage_fairness_spacing_continuity.json" />
+    <None Remove="BenchmarkStandards\optimal_small_fairness_spacing_continuity_coverage.json" />
+    <None Remove="BenchmarkStandards\optimal_small_spacing_continuity_coverage_fairness.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="BenchmarkStandards\optimal_large_continuity_coverage_fairness_spacing.json" />
+    <EmbeddedResource Include="BenchmarkStandards\optimal_large_coverage_fairness_spacing_continuity.json" />
+    <EmbeddedResource Include="BenchmarkStandards\optimal_large_fairness_spacing_continuity_coverage.json" />
+    <EmbeddedResource Include="BenchmarkStandards\optimal_large_spacing_continuity_coverage_fairness.json" />
+    <EmbeddedResource Include="BenchmarkStandards\optimal_medium_continuity_coverage_fairness_spacing.json" />
+    <EmbeddedResource Include="BenchmarkStandards\optimal_medium_coverage_fairness_spacing_continuity.json" />
+    <EmbeddedResource Include="BenchmarkStandards\optimal_medium_fairness_spacing_continuity_coverage.json" />
+    <EmbeddedResource Include="BenchmarkStandards\optimal_medium_spacing_continuity_coverage_fairness.json" />
+    <EmbeddedResource Include="BenchmarkStandards\optimal_small_continuity_coverage_fairness_spacing.json" />
+    <EmbeddedResource Include="BenchmarkStandards\optimal_small_coverage_fairness_spacing_continuity.json" />
+    <EmbeddedResource Include="BenchmarkStandards\optimal_small_fairness_spacing_continuity_coverage.json" />
+    <EmbeddedResource Include="BenchmarkStandards\optimal_small_spacing_continuity_coverage_fairness.json" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="ClosedXML" Version="0.105.0" />
     <PackageReference Include="EPPlus" Version="8.0.8" />
     <PackageReference Include="QuestPDF" Version="2025.7.0" />

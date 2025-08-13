@@ -5,11 +5,10 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:GrafikWPF"
         mc:Ignorable="d"
-        Title=":: Planer dyżurów :: Zakład Diagnostyki Obrazowej, Szpital Kliniczny PBŚ"
+        Title="{Binding DynamicWindowTitle}"
         Background="LightGray"
-        ResizeMode="CanResize"
+        StateChanged="MainWindow_StateChanged"
         WindowStartupLocation="CenterScreen"
-        WindowState="Maximized"
         MinWidth="1280"
         MinHeight="900">
 
@@ -72,21 +71,24 @@
                 <MenuItem Header="_Zakończ" Click="Exit_Click"/>
             </MenuItem>
             <MenuItem Header="_Ustawienia">
+                <MenuItem Header="_Ustawienia ogólne..." Click="GeneralSettings_Click"/>
                 <MenuItem Header="_Zarządzanie dyżurnymi..." Click="SettingsButton_Click"/>
                 <MenuItem Header="_Kolejność priorytetów..." Click="PrioritiesSettings_Click"/>
+                <MenuItem Header="_Wybór silnika obliczeniowego..." Click="AlgorithmSettings_Click"/>
             </MenuItem>
             <MenuItem Header="_Pomoc">
-                <MenuItem Header="_Wyjaśnienie statusów" Click="Legenda_Click"/>
+                <MenuItem Header="_Wyjaśnienie deklaracji" Click="Legenda_Click"/>
+                <MenuItem Header="_Logika i strategia działania" Click="Logic_Click"/>
                 <MenuItem Header="_Informacje o programie" Click="Info_Click"/>
             </MenuItem>
         </Menu>
 
         <TextBlock Grid.Row="1" HorizontalAlignment="Center" TextAlignment="Center" Margin="10,20,10,20">
-            <Run FontSize="20" FontWeight="Bold">Planer dyżurów</Run>
+            <Run FontSize="20" FontWeight="Bold">Grafikomat dyżurowy</Run>
             <LineBreak/>
-            <Run FontSize="16">Zakład Diagnostyki Obrazowej</Run>
+            <Run FontSize="16"><Run.Text><Binding Path="NazwaOddzialuInfo" Mode="OneWay"/></Run.Text></Run>
             <LineBreak/>
-            <Run FontSize="16">Szpital kliniczny im. dr. Emila Warmińskiego Politechniki Bydgoskiej</Run>
+            <Run FontSize="16"><Run.Text><Binding Path="NazwaSzpitalaInfo" Mode="OneWay"/></Run.Text></Run>
         </TextBlock>
 
         <Separator Grid.Row="2" Margin="10,0,10,10"/>
@@ -113,11 +115,7 @@
                     </Grid.RowDefinitions>
 
                     <StackPanel Grid.Row="0" x:Name="HeaderAndGridContainer" Orientation="Vertical">
-                        <StackPanel x:Name="HeaderStackPanel" Orientation="Vertical">
-                            <Grid x:Name="ItemHeaderGrid" />
-                            <Separator Margin="0,5"/>
-                            <Grid x:Name="MainHeaderGrid" />
-                        </StackPanel>
+                        <Grid x:Name="UnifiedHeaderGrid" />
                         <Border ClipToBounds="True">
                             <DataGrid x:Name="GrafikGrid"
                                       AutoGenerateColumns="False" 
@@ -131,7 +129,7 @@
                                       GridLinesVisibility="All"
                                       HorizontalGridLinesBrush="DarkGray"
                                       VerticalGridLinesBrush="DarkGray"
-                                      BorderThickness="0"/>
+                                      BorderThickness="1,0,1,1"/>
                         </Border>
                     </StackPanel>
 
@@ -139,11 +137,25 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <TextBlock Grid.Column="0" Text="{Binding CurrentPriorityInfo}" VerticalAlignment="Center" HorizontalAlignment="Left" FontStyle="Italic" Foreground="Gray" TextWrapping="Wrap"/>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" HorizontalAlignment="Left">
+                            <TextBlock Text="{Binding SelectedEngineInfo}" TextWrapping="Wrap"/>
+                            <TextBlock Text="{Binding PriorityOrderInfo}" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                        </StackPanel>
 
-                        <Button x:Name="ExportButton" Grid.Column="1" Content="Eksportuj grafik..." Click="ExportButton_Click" Padding="10,5" Margin="2">
+                        <CheckBox x:Name="UnlockEditCheckBox"
+                                  Grid.Column="1"
+                                  Content="Odblokuj edycję"
+                                  VerticalAlignment="Center"
+                                  HorizontalAlignment="Center"
+                                  Margin="0,0,20,0"
+                                  Visibility="Collapsed"
+                                  Checked="UnlockEditCheckBox_Changed"
+                                  Unchecked="UnlockEditCheckBox_Changed"/>
+
+                        <Button x:Name="ExportButton" Grid.Column="2" Content="Eksportuj grafik..." Click="ExportButton_Click" Padding="10,5" Margin="2">
                             <Button.ContextMenu>
                                 <ContextMenu>
                                     <MenuItem Header="Kopiuj listę dyżurnych (format Excel)" Click="KopiujDoSchowka_Click" />
@@ -156,17 +168,35 @@
                 </Grid>
             </Grid>
 
-            <Border Background="#99FFFFFF"
-                    Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}">
+            <Border Background="#99FFFFFF" Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}">
                 <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-
-                    <ProgressBar IsIndeterminate="True" Width="250" Height="22"
-                                 Visibility="{Binding IsGenerating, Converter={StaticResource InvertedBoolToVis}}"/>
-
-                    <ProgressBar IsIndeterminate="False" Value="{Binding GenerationProgress}" Width="250" Height="22"
-                                 Visibility="{Binding IsGenerating, Converter={StaticResource BoolToVis}}"/>
-
+                    <ProgressBar IsIndeterminate="{Binding IsProgressIndeterminate}" Value="{Binding GenerationProgress}" Width="250" Height="22" Visibility="{Binding IsBusy, Converter={StaticResource BoolToVis}}"/>
                     <TextBlock Text="{Binding BusyMessage}" Foreground="Black" Margin="0,10,0,0" HorizontalAlignment="Center" FontSize="14"/>
+
+                    <TextBlock Text="{Binding CountdownMessage}" 
+                               Foreground="DarkRed" Margin="0,5,0,0" 
+                               HorizontalAlignment="Center" FontSize="12" 
+                               Visibility="{Binding ShowCountdown, Converter={StaticResource BoolToVis}}"/>
+
+                    <TextBlock Text="{Binding EtaMessage}" 
+                               Foreground="DarkBlue" Margin="0,5,0,0" 
+                               HorizontalAlignment="Center" FontSize="12" 
+                               Visibility="{Binding ShowEta, Converter={StaticResource BoolToVis}}"/>
+
+                    <RichTextBox IsReadOnly="True" Background="Transparent" BorderThickness="0"
+                                 Visibility="{Binding IsDeterministicSolverRunning, Converter={StaticResource BoolToVis}}"
+                                 FontSize="11" FontStyle="Italic" Foreground="Gray"
+                                 TextOptions.TextFormattingMode="Ideal"
+                                 MaxWidth="450" Margin="0,10,0,0">
+                        <FlowDocument TextAlignment="Center">
+                            <Paragraph>
+                                <Run>Obliczenia przy użyciu aktualnego silnika</Run>
+                                <Run FontWeight="Bold" Text="{Binding DeterministicSolverName}"/>
+                                <Run>, który gwarantuje znalezienie najlepszego możliwego wyniku, jednak czas jego wykonania jest nieprzewidywalny; analiza złożonych danych może uniemożliwić znalezienie rozwiązania w akceptowalnym przez użytkownika czasie.</Run>
+                            </Paragraph>
+                        </FlowDocument>
+                    </RichTextBox>
+                    <Button Content="Przerwij" Margin="0,15,0,0" Padding="10,5" Click="CancelButton_Click" Visibility="{Binding IsGenerating, Converter={StaticResource BoolToVis}}"/>
                 </StackPanel>
             </Border>
         </Grid>

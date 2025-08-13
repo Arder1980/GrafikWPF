@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-
-namespace GrafikWPF
+﻿namespace GrafikWPF
 {
     public class RozwiazanyGrafik
     {
@@ -10,12 +6,13 @@ namespace GrafikWPF
         public int DlugoscCiaguPoczatkowego { get; set; }
         public int LiczbaDniObsadzonych => Przypisania.Values.Count(l => l != null);
 
-        // Oddzielne liczniki dla nowych priorytetów
+        public int ZrealizowaneRezerwacje { get; set; }
         public int ZrealizowaneBardzoChce { get; set; }
         public int ZrealizowaneChce { get; set; }
+        public int ZrealizowaneMoge { get; set; }
 
-        // NOWY ELEMENT: Wskaźnik równomierności (im niższy, tym lepiej)
         public double WskaznikRownomiernosci { get; set; }
+        public double WskaznikRozlozeniaDyzurow { get; set; }
 
         public Dictionary<string, int> FinalneOblozenieLekarzy { get; set; } = new();
     }

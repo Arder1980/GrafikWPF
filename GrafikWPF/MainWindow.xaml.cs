@@ -38,16 +38,6 @@ namespace GrafikWPF
         private CancellationTokenSource? _cts;
         private bool _isManualCancellation = false;
 
-        // ====== POSTĘP: zegar, watchdog i „soft-lift” ======
-        private readonly Stopwatch _progressClock = new Stopwatch();
-        private long _lastProgressUiTick = 0;
-        private double _lastProgressPercent = 0;
-        private DispatcherTimer? _progressWatchdog;
-        private long _lastProgressEventTick = 0;
-        private long _lastWatchdogTick = 0;
-        private const double PROGRESS_STALE_SECONDS = 1.0;   // po tylu sekundach ciszy włącz dosuw
-        private const double SOFT_LIFT_RATE_PER_SEC = 1.2;   // tempo dosuwu (pp/s)
-
         private Dictionary<string, int> _limityDyzurow = new();
         private readonly Dictionary<string, TypDostepnosci> _mapaNazwDostepnosci;
         private readonly Dictionary<TypDostepnosci, string> _mapaDostepnosciDoNazw;
@@ -202,8 +192,6 @@ namespace GrafikWPF
             this.Loaded += Window_Loaded;
             this.Closing += Window_Closing;
             this.DataContext = this;
-
-            _progressClock.Start();
         }
 
         private void RefreshDynamicTitles()
@@ -672,16 +660,10 @@ namespace GrafikWPF
                 {
                     if (row["WynikLekarz"] is Lekarz lekarz)
                     {
-                        var typeface = new Typeface(
-                            this.FontFamily ?? SystemFonts.MessageFontFamily,
-                            this.FontStyle,
-                            this.FontWeight,
-                            this.FontStretch);
-
                         var formattedText = new FormattedText(
                             lekarz.PelneImie, CultureInfo.CurrentCulture, FlowDirection.LeftToRight,
-                            typeface, GrafikGrid.FontSize, Brushes.Black, new NumberSubstitution(), 1);
-
+                            new Typeface(this.FontFamily, this.FontStyle, this.FontWeight, this.FontStretch),
+                            GrafikGrid.FontSize, Brushes.Black, new NumberSubstitution(), 1);
                         if (formattedText.Width > columnWidth)
                         {
                             useSymbol = true;
@@ -957,27 +939,39 @@ namespace GrafikWPF
         {
             var stopwatch = new Stopwatch();
             _isManualCancellation = false;
+
+            // === LOGOWANIE: start po kliknięciu „Generuj Grafik” ===
+            try
+            {
+                SolverDiagnostics.Enabled = true; // włączamy logowanie na czas generowania
+                if (!SolverDiagnostics.IsActive) SolverDiagnostics.Start(); // solver wykryje, że log już działa
+                SolverDiagnostics.Log("== [UI] Start generowania grafiku ==");
+                SolverDiagnostics.LogKeyValue("WybranyAlgorytm", DataManager.AppData.WybranyAlgorytm.ToString());
+                var prioDesc = DataManager.AppData.KolejnoscPriorytetowSolvera
+                    .Select(p => PrioritiesWindow.GetEnumDescription(p));
+                SolverDiagnostics.LogKeyValue("Priorytety", string.Join(" > ", prioDesc));
+            }
+            catch { /* log jest pomocniczy – nie zatrzymujemy generowania */ }
+
             await ZapiszBiezacyMiesiac();
             if (string.IsNullOrEmpty(_aktualnyKluczMiesiaca) || !DataManager.AppData.DaneGrafikow.ContainsKey(_aktualnyKluczMiesiaca))
             {
                 MessageBox.Show("Brak danych wejściowych dla bieżącego miesiąca. Nie można wygenerować grafiku.", "Brak Danych", MessageBoxButton.OK, MessageBoxImage.Warning);
+                try { SolverDiagnostics.Log("== [UI] Przerwano: brak danych wejściowych dla bieżącego miesiąca =="); } catch { }
+                try { if (SolverDiagnostics.IsActive) SolverDiagnostics.Stop(); } catch { }
                 return;
             }
             if (!_limityDyzurow.Values.Any(limit => limit > 0))
             {
                 MessageBox.Show("Żaden z aktywnych lekarzy nie ma określonego limitu dyżurów (wszystkie limity wynoszą 0). Aby wygenerować grafik, przynajmniej jeden lekarz musi mieć limit większy od zera.", "Brak limitów", MessageBoxButton.OK, MessageBoxImage.Warning);
+                try { SolverDiagnostics.Log("== [UI] Przerwano: wszystkie limity równe 0 =="); } catch { }
+                try { if (SolverDiagnostics.IsActive) SolverDiagnostics.Stop(); } catch { }
                 return;
             }
 
             BusyMessage = "Generowanie grafiku...";
             GenerationProgress = 0;
             IsProgressIndeterminate = false;
-
-            // reset stanu postępu
-            _lastProgressPercent = 0;
-            _lastProgressUiTick = 0;
-            _lastProgressEventTick = _progressClock.ElapsedTicks;
-            _lastWatchdogTick = _lastProgressEventTick;
 
             var selectedSolver = DataManager.AppData.WybranyAlgorytm;
             IsDeterministicSolverRunning = selectedSolver == SolverType.Backtracking || selectedSolver == SolverType.AStar;
@@ -1008,52 +1002,6 @@ namespace GrafikWPF
             CountdownMessage = $"Automatyczne przerwanie za: {initialTime:mm\\:ss}";
             _countdownTimer.Start();
 
-            // watchdog co 250 ms – miękki dosuw w zastoju
-            _progressWatchdog = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
-            _progressWatchdog.Tick += ProgressWatchdog_Tick;
-            _progressWatchdog.Start();
-
-            // postęp: nie resetuj zegara przy tym samym %
-            var progress = new Progress<double>(p =>
-            {
-                double pctRaw = Math.Max(0, Math.Min(100, p * 100.0));
-                if (pctRaw < _lastProgressPercent)
-                    pctRaw = _lastProgressPercent;
-
-                bool realAdvance = pctRaw > _lastProgressPercent + 0.01; // 0.01 pp histerezy
-
-                if (realAdvance)
-                {
-                    _lastProgressEventTick = _progressClock.ElapsedTicks;
-                    _lastProgressPercent = pctRaw;
-                    GenerationProgress = pctRaw;
-                }
-                else
-                {
-                    var nowTicks = _progressClock.ElapsedTicks;
-                    var minIntervalTicks = Stopwatch.Frequency / 5; // ≤5 Hz
-                    if (nowTicks - _lastProgressUiTick >= minIntervalTicks)
-                    {
-                        _lastProgressUiTick = nowTicks;
-                        GenerationProgress = _lastProgressPercent;
-                    }
-                }
-
-                if (ShowEta && p > 0.01)
-                {
-                    var elapsed = stopwatch.Elapsed;
-                    if (elapsed.TotalMilliseconds > 0)
-                    {
-                        var totalEstimated = TimeSpan.FromMilliseconds(elapsed.TotalMilliseconds / p);
-                        var remaining = totalEstimated - elapsed;
-                        if (remaining.TotalSeconds > 0)
-                        {
-                            EtaMessage = $"Szacowany czas do końca: {remaining:mm\\:ss}";
-                        }
-                    }
-                }
-            });
-
             RozwiazanyGrafik? wynik = null;
             try
             {
@@ -1063,6 +1011,25 @@ namespace GrafikWPF
                     var lekarzeAktywni = DataManager.AppData.WszyscyLekarze.Where(l => l.IsAktywny).ToList();
                     var dostepnosc = DataManager.AppData.DaneGrafikow[_aktualnyKluczMiesiaca].Dostepnosc;
                     var daneDoSilnika = new GrafikWejsciowy { Lekarze = lekarzeAktywni, Dostepnosc = dostepnosc, LimityDyzurow = _limityDyzurow };
+                    var progress = new Progress<double>(p =>
+                    {
+                        GenerationProgress = p * 100;
+                        if (ShowEta && p > 0.01)
+                        {
+                            var elapsed = stopwatch.Elapsed;
+                            if (elapsed.TotalMilliseconds > 0)
+                            {
+                                var totalEstimated = TimeSpan.FromMilliseconds(elapsed.TotalMilliseconds / p);
+                                var remaining = totalEstimated - elapsed;
+                                if (remaining.TotalSeconds > 0)
+                                {
+                                    EtaMessage = $"Szacowany czas do końca: {remaining:mm\\:ss}";
+                                }
+                            }
+                        }
+                    });
+
+                    SolverDiagnostics.Log("[UI] Uruchamiam ReservationSolverWrapper...");
                     var solver = new ReservationSolverWrapper(selectedSolver, daneDoSilnika, DataManager.AppData.KolejnoscPriorytetowSolvera, progress, _cts.Token);
 
                     return solver.ZnajdzOptymalneRozwiazanie();
@@ -1072,6 +1039,7 @@ namespace GrafikWPF
                 {
                     DataManager.AppData.DaneGrafikow[_aktualnyKluczMiesiaca].ZapisanyGrafik = wynik;
                     WyswietlWynikWGrid(wynik);
+                    try { SolverDiagnostics.Log("[UI] Wynik zapisany do AppData i wyświetlony w gridzie."); } catch { }
                 }
             }
             catch (OperationCanceledException)
@@ -1079,40 +1047,36 @@ namespace GrafikWPF
                 if (!_isManualCancellation)
                 {
                     HandleTimeout();
+                    try { SolverDiagnostics.Log("[UI] Przerwanie: przekroczono globalny limit czasu."); } catch { }
                 }
                 else
                 {
                     ClearResultColumns();
+                    try { SolverDiagnostics.Log("[UI] Przerwanie: ręczne anulowanie przez użytkownika."); } catch { }
                 }
             }
             catch (AggregateException ae)
             {
                 if (ae.Flatten().InnerExceptions.OfType<OperationCanceledException>().Any())
                 {
-                    if (!_isManualCancellation) HandleTimeout();
-                    else ClearResultColumns();
+                    if (!_isManualCancellation) { HandleTimeout(); try { SolverDiagnostics.Log("[UI] Przerwanie: przekroczono globalny limit czasu (AggregateException)."); } catch { } }
+                    else { ClearResultColumns(); try { SolverDiagnostics.Log("[UI] Przerwanie: ręczne anulowanie (AggregateException)."); } catch { } }
                 }
                 else
                 {
                     var innerEx = ae.Flatten().InnerException;
                     MessageBox.Show($"Wystąpił błąd krytyczny: {innerEx?.Message}", "Błąd krytyczny", MessageBoxButton.OK, MessageBoxImage.Error);
+                    try { SolverDiagnostics.LogException(innerEx ?? ae, "[UI] Błąd krytyczny w GenerateButton_Click (AggregateException)"); } catch { }
                 }
             }
             catch (Exception ex)
             {
                 MessageBox.Show($"Wystąpił błąd: {ex.Message}", "Błąd krytyczny", MessageBoxButton.OK, MessageBoxImage.Error);
+                try { SolverDiagnostics.LogException(ex, "[UI] Błąd krytyczny w GenerateButton_Click"); } catch { }
             }
             finally
             {
                 stopwatch.Stop();
-
-                if (_progressWatchdog != null)
-                {
-                    _progressWatchdog.Stop();
-                    _progressWatchdog.Tick -= ProgressWatchdog_Tick;
-                    _progressWatchdog = null;
-                }
-
                 _countdownTimer.Stop();
                 if (tickHandler != null) _countdownTimer.Tick -= tickHandler;
                 CountdownMessage = "";
@@ -1123,33 +1087,12 @@ namespace GrafikWPF
                 IsGenerating = false;
                 IsBusy = false;
                 IsDeterministicSolverRunning = false;
-                IsProgressIndeterminate = false;
                 _cts?.Dispose();
                 _cts = null;
-            }
-        }
 
-        // Watchdog: jeśli długo brak realnego postępu – delikatnie „dosuwaj” pasek (do 98%)
-        private void ProgressWatchdog_Tick(object? sender, EventArgs e)
-        {
-            var now = _progressClock.ElapsedTicks;
-            var sinceEvent = (now - _lastProgressEventTick) / (double)Stopwatch.Frequency;
-            var sinceTick = (now - _lastWatchdogTick) / (double)Stopwatch.Frequency;
-            _lastWatchdogTick = now;
-
-            if (GenerationProgress < 99.9 && sinceEvent > PROGRESS_STALE_SECONDS)
-            {
-                var cap = 98.0;
-                if (_lastProgressPercent < cap)
-                {
-                    var inc = SOFT_LIFT_RATE_PER_SEC * sinceTick;
-                    var next = Math.Min(cap, _lastProgressPercent + inc);
-                    if (next > _lastProgressPercent)
-                    {
-                        _lastProgressPercent = next;
-                        GenerationProgress = next;
-                    }
-                }
+                // === LOGOWANIE: zamknięcie po zakończeniu generowania ===
+                try { SolverDiagnostics.Log("== [UI] Koniec generowania (UI) =="); } catch { }
+                try { if (SolverDiagnostics.IsActive) SolverDiagnostics.Stop(); } catch { }
             }
         }
 

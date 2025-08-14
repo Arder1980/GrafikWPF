@@ -190,9 +190,9 @@
                                  MaxWidth="450" Margin="0,10,0,0">
                         <FlowDocument TextAlignment="Center">
                             <Paragraph>
-                                <Run>Obliczenia przy użyciu aktualnego silnika</Run>
+                                <Run>Wybrany silnik,</Run>
                                 <Run FontWeight="Bold" Text="{Binding DeterministicSolverName}"/>
-                                <Run>, który gwarantuje znalezienie najlepszego możliwego wyniku, jednak czas jego wykonania jest nieprzewidywalny; analiza złożonych danych może uniemożliwić znalezienie rozwiązania w akceptowalnym przez użytkownika czasie.</Run>
+                                <Run>, gwarantuje znalezienie najlepszego możliwego wyniku. Jednak jego czas wykonania jest nieprzewidywalny; analiza złożonych danych może uniemożliwić znalezienie rozwiązania w akceptowalnym przez użytkownika czasie.</Run>
                             </Paragraph>
                         </FlowDocument>
                     </RichTextBox>

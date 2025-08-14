@@ -38,6 +38,16 @@ namespace GrafikWPF
         private CancellationTokenSource? _cts;
         private bool _isManualCancellation = false;
 
+        // ====== POSTĘP: zegar, watchdog i „soft-lift” ======
+        private readonly Stopwatch _progressClock = new Stopwatch();
+        private long _lastProgressUiTick = 0;
+        private double _lastProgressPercent = 0;
+        private DispatcherTimer? _progressWatchdog;
+        private long _lastProgressEventTick = 0;
+        private long _lastWatchdogTick = 0;
+        private const double PROGRESS_STALE_SECONDS = 1.0;   // po tylu sekundach ciszy włącz dosuw
+        private const double SOFT_LIFT_RATE_PER_SEC = 1.2;   // tempo dosuwu (pp/s)
+
         private Dictionary<string, int> _limityDyzurow = new();
         private readonly Dictionary<string, TypDostepnosci> _mapaNazwDostepnosci;
         private readonly Dictionary<TypDostepnosci, string> _mapaDostepnosciDoNazw;
@@ -192,6 +202,8 @@ namespace GrafikWPF
             this.Loaded += Window_Loaded;
             this.Closing += Window_Closing;
             this.DataContext = this;
+
+            _progressClock.Start();
         }
 
         private void RefreshDynamicTitles()
@@ -660,10 +672,16 @@ namespace GrafikWPF
                 {
                     if (row["WynikLekarz"] is Lekarz lekarz)
                     {
+                        var typeface = new Typeface(
+                            this.FontFamily ?? SystemFonts.MessageFontFamily,
+                            this.FontStyle,
+                            this.FontWeight,
+                            this.FontStretch);
+
                         var formattedText = new FormattedText(
                             lekarz.PelneImie, CultureInfo.CurrentCulture, FlowDirection.LeftToRight,
-                            new Typeface(this.FontFamily, this.FontStyle, this.FontWeight, this.FontStretch),
-                            GrafikGrid.FontSize, Brushes.Black, new NumberSubstitution(), 1);
+                            typeface, GrafikGrid.FontSize, Brushes.Black, new NumberSubstitution(), 1);
+
                         if (formattedText.Width > columnWidth)
                         {
                             useSymbol = true;
@@ -955,6 +973,12 @@ namespace GrafikWPF
             GenerationProgress = 0;
             IsProgressIndeterminate = false;
 
+            // reset stanu postępu
+            _lastProgressPercent = 0;
+            _lastProgressUiTick = 0;
+            _lastProgressEventTick = _progressClock.ElapsedTicks;
+            _lastWatchdogTick = _lastProgressEventTick;
+
             var selectedSolver = DataManager.AppData.WybranyAlgorytm;
             IsDeterministicSolverRunning = selectedSolver == SolverType.Backtracking || selectedSolver == SolverType.AStar;
             DeterministicSolverName = selectedSolver.ToString() + "Solver";
@@ -984,6 +1008,52 @@ namespace GrafikWPF
             CountdownMessage = $"Automatyczne przerwanie za: {initialTime:mm\\:ss}";
             _countdownTimer.Start();
 
+            // watchdog co 250 ms – miękki dosuw w zastoju
+            _progressWatchdog = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+            _progressWatchdog.Tick += ProgressWatchdog_Tick;
+            _progressWatchdog.Start();
+
+            // postęp: nie resetuj zegara przy tym samym %
+            var progress = new Progress<double>(p =>
+            {
+                double pctRaw = Math.Max(0, Math.Min(100, p * 100.0));
+                if (pctRaw < _lastProgressPercent)
+                    pctRaw = _lastProgressPercent;
+
+                bool realAdvance = pctRaw > _lastProgressPercent + 0.01; // 0.01 pp histerezy
+
+                if (realAdvance)
+                {
+                    _lastProgressEventTick = _progressClock.ElapsedTicks;
+                    _lastProgressPercent = pctRaw;
+                    GenerationProgress = pctRaw;
+                }
+                else
+                {
+                    var nowTicks = _progressClock.ElapsedTicks;
+                    var minIntervalTicks = Stopwatch.Frequency / 5; // ≤5 Hz
+                    if (nowTicks - _lastProgressUiTick >= minIntervalTicks)
+                    {
+                        _lastProgressUiTick = nowTicks;
+                        GenerationProgress = _lastProgressPercent;
+                    }
+                }
+
+                if (ShowEta && p > 0.01)
+                {
+                    var elapsed = stopwatch.Elapsed;
+                    if (elapsed.TotalMilliseconds > 0)
+                    {
+                        var totalEstimated = TimeSpan.FromMilliseconds(elapsed.TotalMilliseconds / p);
+                        var remaining = totalEstimated - elapsed;
+                        if (remaining.TotalSeconds > 0)
+                        {
+                            EtaMessage = $"Szacowany czas do końca: {remaining:mm\\:ss}";
+                        }
+                    }
+                }
+            });
+
             RozwiazanyGrafik? wynik = null;
             try
             {
@@ -993,24 +1063,6 @@ namespace GrafikWPF
                     var lekarzeAktywni = DataManager.AppData.WszyscyLekarze.Where(l => l.IsAktywny).ToList();
                     var dostepnosc = DataManager.AppData.DaneGrafikow[_aktualnyKluczMiesiaca].Dostepnosc;
                     var daneDoSilnika = new GrafikWejsciowy { Lekarze = lekarzeAktywni, Dostepnosc = dostepnosc, LimityDyzurow = _limityDyzurow };
-                    var progress = new Progress<double>(p =>
-                    {
-                        GenerationProgress = p * 100;
-                        if (ShowEta && p > 0.01)
-                        {
-                            var elapsed = stopwatch.Elapsed;
-                            if (elapsed.TotalMilliseconds > 0)
-                            {
-                                var totalEstimated = TimeSpan.FromMilliseconds(elapsed.TotalMilliseconds / p);
-                                var remaining = totalEstimated - elapsed;
-                                if (remaining.TotalSeconds > 0)
-                                {
-                                    EtaMessage = $"Szacowany czas do końca: {remaining:mm\\:ss}";
-                                }
-                            }
-                        }
-                    });
-
                     var solver = new ReservationSolverWrapper(selectedSolver, daneDoSilnika, DataManager.AppData.KolejnoscPriorytetowSolvera, progress, _cts.Token);
 
                     return solver.ZnajdzOptymalneRozwiazanie();
@@ -1053,6 +1105,14 @@ namespace GrafikWPF
             finally
             {
                 stopwatch.Stop();
+
+                if (_progressWatchdog != null)
+                {
+                    _progressWatchdog.Stop();
+                    _progressWatchdog.Tick -= ProgressWatchdog_Tick;
+                    _progressWatchdog = null;
+                }
+
                 _countdownTimer.Stop();
                 if (tickHandler != null) _countdownTimer.Tick -= tickHandler;
                 CountdownMessage = "";
@@ -1063,8 +1123,33 @@ namespace GrafikWPF
                 IsGenerating = false;
                 IsBusy = false;
                 IsDeterministicSolverRunning = false;
+                IsProgressIndeterminate = false;
                 _cts?.Dispose();
                 _cts = null;
+            }
+        }
+
+        // Watchdog: jeśli długo brak realnego postępu – delikatnie „dosuwaj” pasek (do 98%)
+        private void ProgressWatchdog_Tick(object? sender, EventArgs e)
+        {
+            var now = _progressClock.ElapsedTicks;
+            var sinceEvent = (now - _lastProgressEventTick) / (double)Stopwatch.Frequency;
+            var sinceTick = (now - _lastWatchdogTick) / (double)Stopwatch.Frequency;
+            _lastWatchdogTick = now;
+
+            if (GenerationProgress < 99.9 && sinceEvent > PROGRESS_STALE_SECONDS)
+            {
+                var cap = 98.0;
+                if (_lastProgressPercent < cap)
+                {
+                    var inc = SOFT_LIFT_RATE_PER_SEC * sinceTick;
+                    var next = Math.Min(cap, _lastProgressPercent + inc);
+                    if (next > _lastProgressPercent)
+                    {
+                        _lastProgressPercent = next;
+                        GenerationProgress = next;
+                    }
+                }
             }
         }
 

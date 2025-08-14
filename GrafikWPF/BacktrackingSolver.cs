@@ -68,17 +68,25 @@ namespace GrafikWPF
                     var sym = _docsMap[p].Symbol;
                     var a = _in.Dostepnosc[day].GetValueOrDefault(sym, TypDostepnosci.Niedostepny);
                     _av[d, p] = (int)a;
-                    var y = day.AddDays(-1); var t = day.AddDays(1);
+
+                    var y = day.AddDays(-1);
+                    var t = day.AddDays(1);
                     if ((_in.Dostepnosc.ContainsKey(y) && _in.Dostepnosc[y][sym] == TypDostepnosci.DyzurInny) ||
                         (_in.Dostepnosc.ContainsKey(t) && _in.Dostepnosc[t][sym] == TypDostepnosci.DyzurInny))
                         _nextToOther[d, p] = true;
+
                     if (a == TypDostepnosci.BardzoChce) anyBC[d] = true;
                     if (a == TypDostepnosci.Chce) anyCh[d] = true;
                     if (a == TypDostepnosci.Moge || a == TypDostepnosci.MogeWarunkowo) anyMg[d] = true;
                 }
             }
-            _sufBC = BuildSuffix(anyBC); _sufCh = BuildSuffix(anyCh); _sufMg = BuildSuffix(anyMg);
-            _totBC = Count(anyBC); _totCh = Count(anyCh); _totMg = Count(anyMg);
+
+            _sufBC = BuildSuffix(anyBC);
+            _sufCh = BuildSuffix(anyCh);
+            _sufMg = BuildSuffix(anyMg);
+            _totBC = Count(anyBC);
+            _totCh = Count(anyCh);
+            _totMg = Count(anyMg);
 
             _staticCands = new List<int>[_days];
             for (int d = 0; d < _days; d++)
@@ -87,7 +95,8 @@ namespace GrafikWPF
                 for (int p = 0; p < _docs; p++)
                 {
                     var av = (TypDostepnosci)_av[d, p];
-                    if (av is TypDostepnosci.Niedostepny or TypDostepnosci.Urlop or TypDostepnosci.DyzurInny) continue;
+                    if (av is TypDostepnosci.Niedostepny or TypDostepnosci.Urlop or TypDostepnosci.DyzurInny)
+                        continue;
                     v.Add(p);
                 }
                 _staticCands[d] = v;
@@ -98,13 +107,21 @@ namespace GrafikWPF
             {
                 var rnd = new Random(12345);
                 _zDayDoc = new long[_days, _docs];
-                _zEmpty = new long[_days]; _zUnass = new long[_days]; _zCond = new long[_docs, 2];
+                _zEmpty = new long[_days];
+                _zUnass = new long[_days];
+                _zCond = new long[_docs, 2];
                 for (int d = 0; d < _days; d++)
                 {
-                    _zEmpty[d] = rnd.NextInt64(); _zUnass[d] = rnd.NextInt64();
-                    for (int p = 0; p < _docs; p++) _zDayDoc[d, p] = rnd.NextInt64();
+                    _zEmpty[d] = rnd.NextInt64();
+                    _zUnass[d] = rnd.NextInt64();
+                    for (int p = 0; p < _docs; p++)
+                        _zDayDoc[d, p] = rnd.NextInt64();
                 }
-                for (int p = 0; p < _docs; p++) { _zCond[p, 0] = rnd.NextInt64(); _zCond[p, 1] = rnd.NextInt64(); }
+                for (int p = 0; p < _docs; p++)
+                {
+                    _zCond[p, 0] = rnd.NextInt64();
+                    _zCond[p, 1] = rnd.NextInt64();
+                }
             }
         }
 
@@ -128,14 +145,17 @@ namespace GrafikWPF
                 Array.Fill(_bestAssign, -1);
             }
 
-            _assign = new int[_days]; Array.Fill(_assign, UNASSIGNED);
+            _assign = new int[_days];
+            Array.Fill(_assign, UNASSIGNED);
             _work = new int[_docs];
             _condUsed = new bool[_docs];
-            _assignedCount = 0; _obs = 0; _prefx = 0; _bc = 0; _ch = 0; _mg = 0;
+            _assignedCount = 0;
+            _obs = _prefx = _bc = _ch = _mg = 0;
 
             if (_useTT)
             {
-                _hash = 0; for (int d = 0; d < _days; d++) _hash ^= _zUnass[d];
+                _hash = 0;
+                for (int d = 0; d < _days; d++) _hash ^= _zUnass[d];
                 for (int p = 0; p < _docs; p++) _hash ^= _zCond[p, 0];
             }
 
@@ -153,15 +173,19 @@ namespace GrafikWPF
             {
                 var m = ToMetrics(_assign);
                 var vec = EvaluationAndScoringService.ToIntVector(m, _prio);
-                if (Less(vec, _bestVec)) { Array.Copy(_assign, _bestAssign, _days); _bestVec = vec; }
+                if (Less(vec, _bestVec))
+                {
+                    Array.Copy(_assign, _bestAssign, _days);
+                    _bestVec = vec;
+                }
                 return;
             }
 
             if (!CanBeatBest()) return;
 
             int day = NextDayByMRV();
-
             var legal = new List<int>(Math.Max(1, _staticCands[day].Count));
+
             var baseList = _staticCands[day];
             for (int i = 0; i < baseList.Count; i++)
             {
@@ -172,13 +196,10 @@ namespace GrafikWPF
             legal.Sort((a, b) => CompareDelta(day, a, b));
 
             var totalBranches = legal.Count + 1;
-
             for (int i = 0; i < legal.Count; i++)
             {
                 if (depth == 0)
-                {
                     _progress?.Report((double)i / totalBranches);
-                }
 
                 int p = legal[i];
                 Make(day, p);
@@ -187,9 +208,8 @@ namespace GrafikWPF
             }
 
             if (depth == 0)
-            {
                 _progress?.Report((double)legal.Count / totalBranches);
-            }
+
             Make(day, -1);
             DFS(depth + 1);
             Unmake(day, -1);
@@ -209,34 +229,39 @@ namespace GrafikWPF
             int rb = PrefRank((TypDostepnosci)_av[day, pb]);
             if (ra != rb) return ra > rb ? -1 : 1;
 
-            int wla = _work[pa], wlb = _work[pb];
+            int wla = _work[pa];
+            int wlb = _work[pb];
             if (wla != wlb) return wla < wlb ? -1 : 1;
             return pa.CompareTo(pb);
         }
 
-        private static int PrefRank(TypDostepnosci a)
+        private static int PrefRank(TypDostepnosci a) => a switch
         {
-            return a switch
-            {
-                TypDostepnosci.Rezerwacja => 4,
-                TypDostepnosci.BardzoChce => 3,
-                TypDostepnosci.Chce => 2,
-                TypDostepnosci.Moge => 1,
-                _ => 0
-            };
-        }
+            TypDostepnosci.Rezerwacja => 4,
+            TypDostepnosci.BardzoChce => 3,
+            TypDostepnosci.Chce => 2,
+            TypDostepnosci.Moge => 1,
+            _ => 0
+        };
 
         private long[] BuildDelta(int day, int p)
         {
             var res = new long[_prio.Count + 4];
             int k = 0;
 
-            var deltaMetrics = new Dictionary<SolverPriority, long>();
-            deltaMetrics[SolverPriority.LacznaLiczbaObsadzonychDni] = 1;
-            deltaMetrics[SolverPriority.CiagloscPoczatkowa] = (_prefx == day ? 1 : 0);
+            var deltaMetrics = new Dictionary<SolverPriority, long>
+            {
+                [SolverPriority.LacznaLiczbaObsadzonychDni] = 1,
+                [SolverPriority.CiagloscPoczatkowa] = (_prefx == day ? 1 : 0)
+            };
 
             int max = 0, min = int.MaxValue;
-            for (int d = 0; d < _docs; d++) { int w = _work[d]; if (w > max) max = w; if (w < min) min = w; }
+            for (int d = 0; d < _docs; d++)
+            {
+                int w = _work[d];
+                if (w > max) max = w;
+                if (w < min) min = w;
+            }
             int nb = _work[p] + 1;
             int nmax = Math.Max(max, nb);
             int nmin = Math.Min(min, (p == IndexOfMin(_work, min) ? nb : min));
@@ -245,25 +270,25 @@ namespace GrafikWPF
             int last = LastAssignedBefore(day, p);
             deltaMetrics[SolverPriority.RownomiernoscRozlozenia] = (last < 0) ? 100 : (day - last - 1);
 
-            foreach (var pr in _prio)
-            {
-                res[k++] = deltaMetrics[pr];
-            }
+            foreach (var pr in _prio) res[k++] = deltaMetrics[pr];
 
             var av = (TypDostepnosci)_av[day, p];
             res[k++] = av == TypDostepnosci.Rezerwacja ? 1 : 0;
             res[k++] = av == TypDostepnosci.BardzoChce ? 1 : 0;
             res[k++] = av == TypDostepnosci.Chce ? 1 : 0;
             res[k++] = (av == TypDostepnosci.Moge || av == TypDostepnosci.MogeWarunkowo) ? 1 : 0;
+
             return res;
         }
 
         private int IndexOfMin(int[] arr, int currentMin)
         {
-            for (int i = 0; i < arr.Length; i++) if (arr[i] == currentMin) return i;
+            for (int i = 0; i < arr.Length; i++)
+                if (arr[i] == currentMin) return i;
             return -1;
         }
 
+        // --- Najważniejsza poprawka: sprawdzenie poprzedniego i następnego dnia ---
         private bool IsValidDynamic(int day, int p)
         {
             if (p < 0 || p >= _docs) return false;
@@ -272,15 +297,17 @@ namespace GrafikWPF
             var av = (TypDostepnosci)_av[day, p];
             bool bc = av == TypDostepnosci.BardzoChce;
 
-            if (!bc && day > 0)
+            if (!bc)
             {
-                int prev = _assign[day - 1];
-                if (prev == p) return false;
+                if (day > 0 && _assign[day - 1] == p) return false;
+                if (day + 1 < _days && _assign[day + 1] == p) return false;
+                if (_nextToOther[day, p]) return false;
             }
-            if (!bc && _nextToOther[day, p]) return false;
+
             if (av == TypDostepnosci.MogeWarunkowo && _condUsed[p]) return false;
             return true;
         }
+        // ---------------------------------------------------------------------------
 
         private int NextDayByMRV()
         {
@@ -290,7 +317,9 @@ namespace GrafikWPF
                 if (_assign[d] != UNASSIGNED) continue;
                 if (firstUnassigned == -1) firstUnassigned = d;
 
-                int cnt = 1; int bcCnt = 0; int chCnt = 0;
+                int cnt = 1;
+                int bcCnt = 0;
+                int chCnt = 0;
                 var lst = _staticCands[d];
                 for (int i = 0; i < lst.Count; i++)
                 {
@@ -327,13 +356,19 @@ namespace GrafikWPF
 
             if (p != -1)
             {
-                _obs++; _work[p]++;
+                _obs++;
+                _work[p]++;
                 var av = (TypDostepnosci)_av[day, p];
                 if (av == TypDostepnosci.BardzoChce) _bc++;
                 else if (av == TypDostepnosci.Chce) _ch++;
                 else _mg++;
 
-                if (av == TypDostepnosci.MogeWarunkowo && !_condUsed[p]) { if (_useTT) _hash ^= _zCond[p, 0]; _condUsed[p] = true; if (_useTT) _hash ^= _zCond[p, 1]; }
+                if (av == TypDostepnosci.MogeWarunkowo && !_condUsed[p])
+                {
+                    if (_useTT) _hash ^= _zCond[p, 0];
+                    _condUsed[p] = true;
+                    if (_useTT) _hash ^= _zCond[p, 1];
+                }
             }
 
             if (_useTT)
@@ -349,12 +384,18 @@ namespace GrafikWPF
         {
             if (p != -1)
             {
-                _obs--; _work[p]--;
+                _obs--;
+                _work[p]--;
                 var av = (TypDostepnosci)_av[day, p];
                 if (av == TypDostepnosci.BardzoChce) _bc--;
                 else if (av == TypDostepnosci.Chce) _ch--;
                 else _mg--;
-                if (av == TypDostepnosci.MogeWarunkowo && _condUsed[p]) { if (_useTT) _hash ^= _zCond[p, 1]; _condUsed[p] = false; if (_useTT) _hash ^= _zCond[p, 0]; }
+                if (av == TypDostepnosci.MogeWarunkowo && _condUsed[p])
+                {
+                    if (_useTT) _hash ^= _zCond[p, 1];
+                    _condUsed[p] = false;
+                    if (_useTT) _hash ^= _zCond[p, 0];
+                }
             }
             if (_useTT)
             {
@@ -362,7 +403,8 @@ namespace GrafikWPF
                 else _hash ^= _zDayDoc[day, p];
                 _hash ^= _zUnass[day];
             }
-            _assign[day] = UNASSIGNED; _assignedCount--;
+            _assign[day] = UNASSIGNED;
+            _assignedCount--;
             RecomputePrefix();
         }
 
@@ -380,7 +422,8 @@ namespace GrafikWPF
 
         private int LastAssignedBefore(int day, int p)
         {
-            for (int d = day - 1; d >= 0; d--) if (_assign[d] == p) return d;
+            for (int d = day - 1; d >= 0; d--)
+                if (_assign[d] == p) return d;
             return -1;
         }
 
@@ -399,20 +442,22 @@ namespace GrafikWPF
 
             foreach (var p in _prio) g[gi++] = currentMetrics[p];
 
-            g[gi++] = 0; // Rezerwacje
-            g[gi++] = _bc;
-            g[gi++] = _ch;
-            g[gi++] = _mg;
+            g[gi++] = 0;   // Rezerwacje
+            g[gi++] = _bc; // BardzoChce
+            g[gi++] = _ch; // Chce
+            g[gi++] = _mg; // Moge / MogeWarunkowo
 
             int remaining = _days - _assignedCount;
 
-            int remCap = 0; for (int p = 0; p < _docs; p++) remCap += Math.Max(0, _limit[p] - _work[p]);
+            int remCap = 0;
+            for (int p = 0; p < _docs; p++)
+                remCap += Math.Max(0, _limit[p] - _work[p]);
+
             int ubObs = Math.Min(remaining, remCap);
             int ubPref = (_prefx == FirstNonBrokenIndex()) ? remaining : 0;
 
             var add = new long[_prio.Count + 4];
             gi = 0;
-
             var heuMetrics = new Dictionary<SolverPriority, long>
             {
                 { SolverPriority.LacznaLiczbaObsadzonychDni, ubObs },
@@ -423,17 +468,17 @@ namespace GrafikWPF
             foreach (var p in _prio) add[gi++] = heuMetrics[p];
 
             int next = EarliestOpenIndex();
-            add[gi++] = 0; // Rezerwacje
+            add[gi++] = 0;
             add[gi++] = _sufBC[next];
             add[gi++] = _sufCh[next];
             add[gi++] = _sufMg[next];
 
             var caps = new long[_prio.Count + 4];
             gi = 0;
+            foreach (var p in _prio)
+                caps[gi++] = (p == SolverPriority.SprawiedliwoscObciazenia || p == SolverPriority.RownomiernoscRozlozenia) ? 0 : _days;
 
-            foreach (var p in _prio) caps[gi++] = (p == SolverPriority.SprawiedliwoscObciazenia || p == SolverPriority.RownomiernoscRozlozenia) ? 0 : _days;
-
-            caps[gi++] = long.MaxValue; // Rezerwacje
+            caps[gi++] = long.MaxValue;
             caps[gi++] = _totBC;
             caps[gi++] = _totCh;
             caps[gi++] = _totMg;
@@ -458,7 +503,8 @@ namespace GrafikWPF
 
         private int FirstNonBrokenIndex()
         {
-            for (int i = 0; i < _prefx; i++) if (_assign[i] == -1) return -1;
+            for (int i = 0; i < _prefx; i++)
+                if (_assign[i] == -1) return -1;
             return _prefx;
         }
 
@@ -473,32 +519,61 @@ namespace GrafikWPF
             return _days;
         }
 
-        private static int[] BuildSuffix(bool[] any) { int n = any.Length; var s = new int[n + 1]; for (int i = n - 1; i >= 0; i--) s[i] = s[i + 1] + (any[i] ? 1 : 0); return s; }
-        private static int Count(bool[] a) { int c = 0; for (int i = 0; i < a.Length; i++) if (a[i]) c++; return c; }
+        private static int[] BuildSuffix(bool[] any)
+        {
+            int n = any.Length;
+            var s = new int[n + 1];
+            for (int i = n - 1; i >= 0; i--)
+                s[i] = s[i + 1] + (any[i] ? 1 : 0);
+            return s;
+        }
+
+        private static int Count(bool[] a)
+        {
+            int c = 0;
+            for (int i = 0; i < a.Length; i++) if (a[i]) c++;
+            return c;
+        }
 
         private RozwiazanyGrafik ToMetrics(int[] assign)
         {
             var map = new Dictionary<DateTime, Lekarz?>(assign.Length);
             var ob = new Dictionary<string, int>(_docs);
             for (int p = 0; p < _docs; p++) ob[_docsMap[p].Symbol] = 0;
+
             for (int d = 0; d < _days; d++)
             {
                 var day = _in.DniWMiesiacu[d];
                 int p = assign[d];
-                if (p >= 0) { var L = _docsMap[p]; map[day] = L; ob[L.Symbol]++; }
+                if (p >= 0)
+                {
+                    var L = _docsMap[p];
+                    map[day] = L;
+                    ob[L.Symbol]++;
+                }
                 else map[day] = null;
             }
+
             return EvaluationAndScoringService.CalculateMetrics(map, ob, _in);
         }
 
         private static bool Less(long[] a, long[] b)
         {
-            for (int i = 0; i < a.Length; i++) { if (a[i] == b[i]) continue; return a[i] > b[i]; }
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (a[i] == b[i]) continue;
+                return a[i] > b[i];
+            }
             return false;
         }
+
         private static bool LessSpan(long[] a, long[] b)
         {
-            for (int i = 0; i < a.Length; i++) { if (a[i] == b[i]) continue; return a[i] > b[i]; }
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (a[i] == b[i]) continue;
+                return a[i] > b[i];
+            }
             return false;
         }
 
@@ -513,8 +588,14 @@ namespace GrafikWPF
                 wl[p]++;
                 if (wl[p] > _limit[p]) return false;
                 var av = (TypDostepnosci)_av[d, p];
-                if (av != TypDostepnosci.BardzoChce && d > 0 && a[d - 1] == p) return false;
-                if (av != TypDostepnosci.BardzoChce && _nextToOther[d, p]) return false;
+
+                if (av != TypDostepnosci.BardzoChce)
+                {
+                    if (d > 0 && a[d - 1] == p) return false;
+                    if (d + 1 < _days && a[d + 1] == p) return false;
+                    if (_nextToOther[d, p]) return false;
+                }
+
                 if (av == TypDostepnosci.MogeWarunkowo)
                 {
                     if (usedCond[p]) return false;

@@ -1,0 +1,48 @@
+name: Build AI_DUMP.txt on push
+
+on:
+  push:
+    branches: ["**"]
+    # żeby uniknąć pętli, nie odpalaj się, gdy zmienia się sam DUMP albo ten workflow
+    paths-ignore:
+      - 'AI_DUMP.txt'
+      - '.github/workflows/ai-dump.yml'
+
+permissions:
+  contents: write  # pozwól akcji dopisać commit z DUMPem
+
+jobs:
+  build-dump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true  # użyj automatycznego GITHUB_TOKEN
+
+      - name: Generate AI_DUMP.txt (all .cs, .xaml, .csproj, .sln)
+        shell: bash
+        run: |
+          set -e
+          sha=$(git rev-parse HEAD)
+          printf "AI_DUMP (commit %s)\n\n" "$sha" > AI_DUMP.txt
+          git ls-files | grep -E '\.(cs|xaml|csproj|sln)$' | sort | while read p; do
+            echo "===== FILE: $p =====" >> AI_DUMP.txt
+            cat "$p" >> AI_DUMP.txt
+            echo "===== END FILE =====" >> AI_DUMP.txt
+            echo >> AI_DUMP.txt
+          done
+
+      - name: Commit & push AI_DUMP.txt if changed
+        shell: bash
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet -- AI_DUMP.txt; then
+            git add AI_DUMP.txt
+            git commit -m "Auto: update AI_DUMP for $(git rev-parse --short HEAD)"
+            git push
+          else
+            echo "No changes in AI_DUMP.txt"
+          fi

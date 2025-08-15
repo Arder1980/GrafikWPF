@@ -1,1086 +1,1423 @@
 ﻿#nullable enable
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 
 namespace GrafikWPF
 {
+    /// <summary>
+    /// Backtracking z priorytetem ciągłości (gdy wybrany przez użytkownika) i ochroną CH/BC:
+    /// - Rolling horizon (K<=7) egzekwowany twardo na froncie ciągłości,
+    /// - CRP: wybór kandydata maksymalizującego gwarantowany prefiks w oknie,
+    /// - Inteligentna ochrona CH/BC (balans U(c) vs R(c)),
+    /// - Adaptacyjna lokalna naprawa pierwszej dziury (cofka 5–7),
+    /// - MW = 1 na osobę,
+    /// - Reguły sąsiedztwa: BC może łamać „dzień-po-dniu” i „Inny dyżur ±1”; MG/CH/MW nie mogą.
+    /// </summary>
     public sealed class BacktrackingSolver : IGrafikSolver
     {
+        // Kody preferencji (twarda dostępność):
+        private const byte PREF_NONE = 0; // brak / niedostępny
+        private const byte PREF_MW = 1; // Mogę warunkowo (max 1 w miesiącu)
+        private const byte PREF_MG = 2; // Mogę
+        private const byte PREF_CH = 3; // Chcę
+        private const byte PREF_BC = 4; // Bardzo chcę
+        private const byte PREF_RZ = 5; // Rezerwacja (musi być)
+        private const byte PREF_OD = 6; // Dyżur (inny) – dzień +/-1 (dla MG/CH/MW działa blokada)
+
+        // Stałe wyszukiwania
         private const int UNASSIGNED = int.MinValue;
+        private const int EMPTY = -1;
 
-        // Parametry heurystyk (łatwe do strojenia)
-        private const int MATCH_WINDOW_BASE = 9;        // bazowa szerokość okna przepustowości
-        private const int MATCH_WINDOW_MIN = 7;        // min
-        private const int MATCH_WINDOW_MAX = 12;       // max
-        private const int CH_RESERVE_HORIZON_DAYS = 7;  // horyzont „rezerwowania” dni CH (krótki)
-        private const int SMALL_DEFICIT_MAX = 2;        // mały deficyt okna, który można „pokryć” pustką
+        // Rolling horizon / CRP / ochrona CH/BC
+        private const int RH_MIN_K = 2;
+        private const int RH_MAX_K = 7; // okno przodu dla prefiksu
+        private const int CH_PROTECT_K = 7; // okno dla balansu U(c)/R(c)
 
-        private readonly GrafikWejsciowy _in;
-        private readonly List<SolverPriority> _prio;
+        // LocalRepair
+        private const int LR_MIN_BACK = 5;
+        private const int LR_MAX_BACK = 7;
+        private const int LR_FWD = 4;
+
+        // Pomocnicze
+        private const int UNIT_PROP_LIMIT = 2;
+
+        // Dane wejściowe / kontekst
+        private readonly GrafikWejsciowy _input;
+        private readonly IReadOnlyList<SolverPriority> _priorities;
         private readonly IProgress<double>? _progress;
-        private readonly CancellationToken _ct;
+        private readonly CancellationToken _token;
 
-        private readonly int _days, _docs;
-        private readonly List<Lekarz> _docsMap;
+        private readonly List<DateTime> _days;
+        private readonly List<Lekarz> _docs;
+        private readonly Dictionary<string, int> _docIdxBySymbol;
+        private readonly Dictionary<DateTime, Dictionary<string, TypDostepnosci>> _av;
+        private readonly int[] _limitsByDoc;
 
-        private readonly int[,] _av;              // deklaracje jako TypDostepnosci
-        private readonly int[] _limit;            // limity lekarzy
-        private readonly bool[,] _nextToOther;    // sąsiedztwo „Dyżur (inny)”
-        private readonly List<int>[] _staticCands;
+        // Prekomputacja dostępności
+        private readonly byte[,] _pref; // [day, doc] -> PREF_*
 
         // Stan bieżący
-        private int[] _assign = Array.Empty<int>();  // dzień -> lekarz (UNASSIGNED / -1=PUSTO / >=0 = indeks lekarza)
-        private int[] _work = Array.Empty<int>();  // ile dyżurów na lekarza
-        private int[] _mwCount = Array.Empty<int>(); // ile razy lekarz użył „Mogę warunkowo” (MW)
-        private int _assignedCount, _obs, _prefx;
+        private readonly int[] _assign; // day -> doc idx; EMPTY/UNASSIGNED
+        private readonly int[] _work;   // ile przydzielono lekarzowi
+        private readonly int[] _mwUsed; // ile MW wykorzystał lekarz
+        private int _assignedFilled;     // ile dni obsadzonych
 
-        // PUSTKI – „kredyty”
-        private int _blankCreditsTotal;
-        private int _blankCreditsUsed;
+        // Prefiks (ciągłość od początku)
+        private bool _isPrefixActive;
+        private int _prefixFirstHole = -1;
+        private bool _localRepairTried = false;
 
         // Najlepszy wynik
-        private readonly object _bestLock = new();
-        private long[] _bestVec = Array.Empty<long>();
-        private int[] _bestAssign = Array.Empty<int>();
+        private RozwiazanyGrafik? _best;
+        private long[]? _bestScore;
 
-        private bool _diagStartedHere = false;
-
-        public BacktrackingSolver(GrafikWejsciowy dane, List<SolverPriority> priorytety,
-                                  IProgress<double>? progress = null, CancellationToken ct = default)
+        public BacktrackingSolver(GrafikWejsciowy input,
+                                  IReadOnlyList<SolverPriority> priorities,
+                                  IProgress<double>? progress,
+                                  CancellationToken token)
         {
-            _in = dane; _prio = priorytety; _progress = progress; _ct = ct;
+            _input = input;
+            _priorities = priorities ?? Array.Empty<SolverPriority>();
+            _progress = progress;
+            _token = token;
 
-            _docsMap = _in.Lekarze.Where(l => l.IsAktywny).ToList();
-            _days = _in.DniWMiesiacu.Count;
-            _docs = _docsMap.Count;
+            _days = _input.Dostepnosc.Keys.OrderBy(d => d).ToList();
+            _docs = _input.Lekarze.OrderBy(l => l.Nazwisko).ThenBy(l => l.Imie).ToList();
 
-            _av = new int[_days, _docs];
-            _limit = new int[_docs];
-            _nextToOther = new bool[_days, _docs];
-            _staticCands = new List<int>[_days];
+            _docIdxBySymbol = new Dictionary<string, int>(_docs.Count);
+            for (int i = 0; i < _docs.Count; i++)
+                _docIdxBySymbol[_docs[i].Symbol] = i;
 
-            // limity
-            for (int p = 0; p < _docs; p++)
+            _av = _input.Dostepnosc;
+
+            _limitsByDoc = new int[_docs.Count];
+            for (int i = 0; i < _docs.Count; i++)
             {
-                var sym = _docsMap[p].Symbol;
-                _limit[p] = _in.LimityDyzurow.TryGetValue(sym, out var lim) ? lim : _days;
+                var sym = _docs[i].Symbol;
+                _limitsByDoc[i] = _input.LimityDyzurow.TryGetValue(sym, out var lim) ? lim : _days.Count;
             }
 
-            // macierze dostępności i sąsiedztwa
-            for (int d = 0; d < _days; d++)
+            _pref = new byte[_days.Count, _docs.Count];
+            PrecomputeAvailability();
+
+            _assign = Enumerable.Repeat(UNASSIGNED, _days.Count).ToArray();
+            _work = new int[_docs.Count];
+            _mwUsed = new int[_docs.Count];
+            _assignedFilled = 0;
+
+            _isPrefixActive = true;
+        }
+
+        // ====== Prekomputacja ======
+        private void PrecomputeAvailability()
+        {
+            for (int d = 0; d < _days.Count; d++)
             {
-                var date = _in.DniWMiesiacu[d];
-                var prev = date.AddDays(-1);
-                var next = date.AddDays(1);
-
-                for (int p = 0; p < _docs; p++)
+                var date = _days[d];
+                for (int p = 0; p < _docs.Count; p++)
                 {
-                    var sym = _docsMap[p].Symbol;
-                    var a = _in.Dostepnosc[date].GetValueOrDefault(sym, TypDostepnosci.Niedostepny);
-                    _av[d, p] = (int)a;
+                    var sym = _docs[p].Symbol;
+                    var td = (_av.TryGetValue(date, out var map) && map.TryGetValue(sym, out var t))
+                        ? t : TypDostepnosci.Niedostepny;
 
-                    if ((_in.Dostepnosc.ContainsKey(prev) && _in.Dostepnosc[prev].GetValueOrDefault(sym) == TypDostepnosci.DyzurInny) ||
-                        (_in.Dostepnosc.ContainsKey(next) && _in.Dostepnosc[next].GetValueOrDefault(sym) == TypDostepnosci.DyzurInny))
-                        _nextToOther[d, p] = true;
+                    _pref[d, p] = td switch
+                    {
+                        TypDostepnosci.MogeWarunkowo => PREF_MW,
+                        TypDostepnosci.Moge => PREF_MG,
+                        TypDostepnosci.Chce => PREF_CH,
+                        TypDostepnosci.BardzoChce => PREF_BC,
+                        TypDostepnosci.Rezerwacja => PREF_RZ,
+                        TypDostepnosci.DyzurInny => PREF_OD,
+                        _ => PREF_NONE
+                    };
                 }
-            }
-
-            // kandydaci statyczni (kolejność: Rezerwacja > BC > CH > MG > MW)
-            for (int d = 0; d < _days; d++)
-            {
-                var rez = new List<int>(_docs);
-                var zwykli = new List<int>(_docs);
-
-                for (int p = 0; p < _docs; p++)
-                {
-                    var t = (TypDostepnosci)_av[d, p];
-                    if (t == TypDostepnosci.Niedostepny || t == TypDostepnosci.Urlop || t == TypDostepnosci.DyzurInny) continue;
-                    if (t == TypDostepnosci.Rezerwacja) rez.Add(p); else zwykli.Add(p);
-                }
-
-                var baseList = rez.Count > 0 ? rez : zwykli;
-                baseList.Sort((a, b) =>
-                {
-                    int ra = PrefRank((TypDostepnosci)_av[d, a]);
-                    int rb = PrefRank((TypDostepnosci)_av[d, b]);
-                    if (ra != rb) return rb.CompareTo(ra);
-                    return a.CompareTo(b);
-                });
-                _staticCands[d] = baseList;
             }
         }
 
+        // ====== API ======
         public RozwiazanyGrafik ZnajdzOptymalneRozwiazanie()
         {
-            _ct.ThrowIfCancellationRequested();
-
-            if (SolverDiagnostics.Enabled && !SolverDiagnostics.IsActive)
+            SolverDiagnostics.Log("=== Start BacktrackingSolver ===");
+            SolverDiagnostics.Log($"Dni: {_days.Count}, lekarze: {_docs.Count}");
+            SolverDiagnostics.Log($"Priorytety: {string.Join(", ", _priorities)}");
+            // === ETAP 0: Nagłówek statusu polityk (tylko log, zero zmian logiki) ===
+            try
             {
-                SolverDiagnostics.Start();
-                _diagStartedHere = true;
+                // Nazwa solvera do raportu
+                const string solverName = "Backtracking";
+
+                // Kolejność priorytetów – dynamicznie z tego, co masz w solverze/UI
+                // Jeśli masz pole prywatne z listą priorytetów, użyj go;
+                // jeśli nie – sięgnij po DataManager.AppData.KolejnoscPriorytetowSolvera.
+                IReadOnlyList<SolverPriority> pri =
+                    _priorities ?? DataManager.AppData.KolejnoscPriorytetowSolvera;
+
+                // Stan polityk – na ETAP 0 logujemy bez wymuszania niczego w logice.
+                // USTALENIA: CHProtect=OFF (bez twardego rezerwowania CH/BC),
+                // BC_breaks_adjacent=TRUE (BC może łamać sąsiedztwo ±1),
+                // MW_max=1 (maks. 1 dzień „Mogę warunkowo” na lekarza).
+                // Rolling horizon i LocalRepair podaj wg tego, co masz TERAZ:
+                // jeżeli masz stałe K=2 i brak LocalRepair → wpisz (2,2) i (0,0).
+                bool chProtectEnabled = false; // ma być WYŁĄCZONE
+                bool bcBreaksAdjacent = true;  // BC może łamać ±1
+                int mwMax = 1;     // maks. 1 MW na osobę
+                var rhK = (min: 2, max: 2);   // jeśli teraz używasz K=2
+                var lrBack = (min: 0, max: 0);   // jeśli nie masz LocalRepair – 0,0
+                var lrFwd = (min: 0, max: 0);   // jw.
+
+                SolverPolicyStatus.LogStartupHeader(
+                    solverName: solverName,
+                    priorities: pri,
+                    chProtectEnabled: chProtectEnabled,
+                    bcBreaksAdjacent: bcBreaksAdjacent,
+                    mwMax: mwMax,
+                    rhK: rhK,
+                    lrBack: lrBack,
+                    lrFwd: lrFwd
+                );
             }
-            LogHeaderInput();
-
-            _assign = new int[_days]; Array.Fill(_assign, UNASSIGNED);
-            _work = new int[_docs];
-            _mwCount = new int[_docs];
-            _assignedCount = 0; _obs = 0; _prefx = 0;
-
-            // kredyty pustek: 1 na każde 10 dni (zaokrąglone w górę), minimum 1 dla 1–10 dni
-            _blankCreditsTotal = Math.Max(1, (int)Math.Ceiling(_days / 10.0));
-            _blankCreditsUsed = 0;
-            SolverDiagnostics.Log($"Kredyty pustek: {_blankCreditsUsed}/{_blankCreditsTotal}");
-
-            (_bestAssign, _bestVec) = BuildGreedyIncumbent();
-
-            DFS();
-
-            var res = new RozwiazanyGrafik();
-            for (int d = 0; d < _days; d++)
+            catch (Exception ex)
             {
-                var date = _in.DniWMiesiacu[d];
-                int p = _bestAssign.Length == _days ? _bestAssign[d] : -1;
-                res.Przypisania[date] = (p >= 0 ? _docsMap[p] : null);
+                // Diagnostyka nie może zabić solvera – tylko logujemy błąd i jedziemy dalej
+                SolverDiagnostics.Log("[Policy] Header logging failed: " + ex.Message);
             }
+            // === /ETAP 0 ===
+            LogLimits();
+            LogLegendAndAvailability();
 
-            _progress?.Report(1.0);
-            SolverDiagnostics.Log("Zakończono generowanie.");
-            if (_diagStartedHere) SolverDiagnostics.Stop();
-            return res;
+            BuildGreedyIncumbent();
+
+            try { Search(0); }
+            catch (OperationCanceledException) { SolverDiagnostics.Log("Przerwano (CancellationToken)."); }
+
+            if (_best is null)
+            {
+                var dict = new Dictionary<DateTime, Lekarz?>();
+                for (int d = 0; d < _days.Count; d++)
+                    dict[_days[d]] = _assign[d] >= 0 ? _docs[_assign[d]] : null;
+                _best = new RozwiazanyGrafik { Przypisania = dict };
+            }
+            return _best!;
         }
 
-        private void DFS()
+        // ====== Backtracking ======
+        private void Search(int depth)
         {
-            _ct.ThrowIfCancellationRequested();
+            _token.ThrowIfCancellationRequested();
 
-            if (_assignedCount == _days) { SubmitBest(); return; }
-            if (!CanBeatBestUB()) { SolverDiagnostics.Log("Przycięto gałąź: górna granica (UB)."); return; }
+            if (depth % 4 == 0)
+                _progress?.Report((_assignedFilled + CountEmpties()) / (double)_days.Count);
 
-            // 1) Jednokrokowa unit-propagacja: jeśli dokładnie jeden kandydat – ustaw i sprawdź
+            int day = NextDayToBranch();
+            if (day == -1) { ConsiderAsBest(); return; }
+
+            if (!BoundAllowsImprovement(day)) return;
+
+            var candidates = OrderCandidates(day);
+
+            // Rolling-horizon + CRP + ochrona CH/BC tylko na froncie prefiksu (gdy ciągłość to priorytet #1)
+            bool continuityFirst = _priorities.Count > 0 && _priorities[0] == SolverPriority.CiagloscPoczatkowa;
+            bool atPrefixFront = _isPrefixActive && day == PrefixLength();
+
+            if (continuityFirst && atPrefixFront && candidates.Count > 0)
             {
-                int dayUnit = NextDayByStrategy(out bool continuityActive);
-                var leg = CollectLegal(dayUnit, continuityActive);
-                if (leg.Count == 1)
+                // Inteligentna ochrona CH/BC (R(c) > U(c)) – wytnij ruchy ryzykowne
+                candidates = FilterByCoverBalance(day, candidates, CH_PROTECT_K);
+
+                // Rolling horizon: wymagaj wykonalności okna
+                var filtered = FilterByRollingFeasibility(day, candidates);
+                if (filtered.Count == 0)
                 {
-                    int p = leg[0];
-                    var av = (TypDostepnosci)_av[dayUnit, p];
-                    SolverDiagnostics.Log($"Unit-prop: dzień {FmtDay(dayUnit)} → jedyny kandydat {FmtDoc(p)} ({FmtPref(av)}).");
-
-                    Make(dayUnit, p);
-
-                    if (!ForwardFeasibleAfter(dayUnit, p, av, continuityActive, out string? reasonF, out _))
-                    {
-                        SolverDiagnostics.Log($"Odrzucam po unit-prop: forward-check fail → {reasonF}");
-                        Unmake(dayUnit);
-                        return;
-                    }
-                    if (!WindowFeasibleAfter(dayUnit, p, av, continuityActive, out string? reasonW, out int deficit) &&
-                        !TrySpendBlankIfSmallDeficit(dayUnit, reasonW, deficit, continuityActive))
-                    {
-                        SolverDiagnostics.Log($"Odrzucam po unit-prop: okno nie do przejścia → {reasonW}");
-                        Unmake(dayUnit);
-                        return;
-                    }
-
-                    DFS();
-                    Unmake(dayUnit);
+                    SolverDiagnostics.Log($"[RH] 0 kandydatów po filtrze okna – {FormatDay(day)} → wymuszone PUSTO i LocalRepair.");
+                    HandleFirstHole(day);
                     return;
                 }
+
+                // CRP: wybierz kandydata, który maksymalizuje gwarantowany prefiks
+                candidates = OrderByCRP(day, filtered, RH_MAX_K);
+            }
+            else
+            {
+                // Po prefiksie: nie filtrujemy „na twardo”, ale karzemy psucie CH/BC w rankingu
+                if (candidates.Count > 1)
+                    candidates.Sort((a, b) =>
+                    {
+                        int pa = FutureCHPenalty(day, a, CH_PROTECT_K);
+                        int pb = FutureCHPenalty(day, b, CH_PROTECT_K);
+                        int cmp = pa.CompareTo(pb);
+                        if (cmp != 0) return cmp;
+                        return CompareCandidates(day, a, b);
+                    });
             }
 
-            // 2) Wybór dnia + kandydaci (dwufazowo: najpierw BC/CH/Rezerwacja, potem MG/MW)
-            int day = NextDayByStrategy(out bool contActive);
-            var legalAll = CollectLegal(day, contActive);
-            LogCandidatesWithReasons(day, legalAll, contActive);
-
-            if (legalAll.Count == 0)
+            if (candidates.Count == 0)
             {
-                // Nikt legalny → spróbuj PUSTO (nawet przy ciągłości)
-                SolverDiagnostics.Log($"PRÓBA: {FmtDay(day)} ← PUSTO (brak legalnych kandydatów)");
-                Make(day, -1);
-                DFS();
-                Unmake(day);
+                bool firstHole = _isPrefixActive && day == PrefixLength();
+                if (firstHole) HandleFirstHole(day);
+                else
+                {
+                    PlaceEmpty(day);
+                    Search(depth + 1);
+                    UnplaceEmpty(day);
+                }
                 return;
             }
 
-            // Faza 1: tylko Rezerwacja/BC/CH
-            var legalPhase1 = legalAll.Where(p =>
+            foreach (var doc in candidates)
             {
-                var t = (TypDostepnosci)_av[day, p];
-                return t == TypDostepnosci.Rezerwacja || t == TypDostepnosci.BardzoChce || t == TypDostepnosci.Chce;
-            }).ToList();
+                if (!IsHardFeasible(day, doc)) continue;
 
-            // Faza 2: MG/MW
-            var legalPhase2 = legalAll.Where(p =>
+                SolverDiagnostics.Log($"WYBÓR: {FormatDay(day)} ← {_docs[doc].Symbol} [{PrefToString(_pref[day, doc])}]");
+
+                Place(day, doc, out byte codeToday);
+
+                int autoSteps = 0;
+                if (codeToday == PREF_RZ) autoSteps = UnitPropagateReservations(day);
+
+                Search(depth + 1);
+
+                if (autoSteps > 0) UnpropagateReservations(day, autoSteps);
+
+                Unplace(day, doc, codeToday);
+            }
+        }
+
+        private void HandleFirstHole(int day)
+        {
+            _isPrefixActive = false;
+            _prefixFirstHole = day;
+            SolverDiagnostics.Log($"[BT] Pierwsza pustka na {FormatDay(day)} – koniec prefiksu.");
+
+            if (!_localRepairTried)
             {
-                var t = (TypDostepnosci)_av[day, p];
-                return t == TypDostepnosci.Moge || t == TypDostepnosci.MogeWarunkowo;
-            }).ToList();
+                _localRepairTried = true;
+                TryLocalRepairAround(day);
+            }
 
-            bool progressed = false;
-            bool anyWindowSmallDeficit = false;
+            PlaceEmpty(day);
+            Search(0 + 1);
+            UnplaceEmpty(day);
+        }
 
-            foreach (var phase in new[] { legalPhase1, legalPhase2 })
+        // ====== Wybór kolejnej zmiennej (MRV po prefiksie) ======
+        private int NextDayToBranch()
+        {
+            if (_isPrefixActive)
             {
-                if (phase.Count == 0) { continue; }
+                for (int d = 0; d < _days.Count; d++)
+                    if (_assign[d] == UNASSIGNED) return d;
+                return -1;
+            }
 
-                // Sortowanie: ranga deklaracji > mniej przyszłych CH (horyzont 7) > mniejsze obciążenie > mniejsza pozostała pojemność > indeks
-                phase.Sort((a, b) =>
+            int bestDay = -1, bestCnt = int.MaxValue;
+
+            for (int d = 0; d < _days.Count; d++)
+            {
+                if (_assign[d] != UNASSIGNED) continue;
+
+                int c = 0;
+                for (int p = 0; p < _docs.Count; p++)
                 {
-                    int ra = PrefRank((TypDostepnosci)_av[day, a]);
-                    int rb = PrefRank((TypDostepnosci)_av[day, b]);
+                    if (IsHardFeasible(d, p))
+                    {
+                        c++;
+                        if (c >= bestCnt) break;
+                    }
+                }
+                if (c < bestCnt)
+                {
+                    bestCnt = c;
+                    bestDay = d;
+                    if (bestCnt <= 1) break;
+                }
+            }
+            return bestDay;
+        }
+
+        // ====== Branch&Bound – górne oszacowanie ======
+        private bool BoundAllowsImprovement(int firstUnassignedDay)
+        {
+            if (_bestScore == null) return true;
+
+            long obsSoFar = _assignedFilled;
+            long remain = _days.Count - (firstUnassignedDay < 0 ? _days.Count : firstUnassignedDay);
+            long obsBound = obsSoFar + remain;
+
+            long contSoFar = CurrentPrefixLengthFast();
+            long contBound = _isPrefixActive ? contSoFar + (_days.Count - contSoFar) : contSoFar;
+
+            long fairBound = 0;
+            long evenBound = 0;
+
+            var map = new Dictionary<SolverPriority, long>
+            {
+                { SolverPriority.LacznaLiczbaObsadzonychDni, obsBound },
+                { SolverPriority.CiagloscPoczatkowa, contBound },
+                { SolverPriority.SprawiedliwoscObciazenia, fairBound },
+                { SolverPriority.RownomiernoscRozlozenia, evenBound }
+            };
+
+            var vec = new long[_priorities.Count];
+            for (int i = 0; i < _priorities.Count; i++)
+                vec[i] = map.TryGetValue(_priorities[i], out var v) ? v : 0;
+
+            return LexGreater(vec, _bestScore);
+        }
+
+        private int CurrentPrefixLengthFast()
+        {
+            int len = 0;
+            for (; len < _days.Count; len++)
+            {
+                if (_assign[len] == UNASSIGNED) break;
+                if (_assign[len] == EMPTY) break;
+            }
+            return len;
+        }
+
+        // ====== Rolling horizon / CRP / Ochrona CH/BC ======
+
+        // (A) Ochrona CH/BC: wytnij ruchy z R(c) <= U(c)
+        private List<int> FilterByCoverBalance(int day, List<int> candidates, int k)
+        {
+            int end = Math.Min(_days.Count - 1, day + k);
+            var ok = new List<int>(candidates.Count);
+
+            foreach (var p in candidates)
+            {
+                var codeToday = _pref[day, p];
+                int U = UniqueCHBCForDocInWindow(p, day + 1, end, day, p, codeToday);
+                int R = RealSlotsForDocInWindow(p, day + 1, end, day, p, codeToday);
+
+                SolverDiagnostics.Log($"[CHProtect] {FormatDay(day)} {_docs[p].Symbol}: U={U}, R={R}");
+
+                if (R > U) ok.Add(p);
+                else SolverDiagnostics.Log($"[CHProtect] Odrzucono {_docs[p].Symbol} – R<=U w oknie.");
+            }
+            return ok;
+        }
+
+        // (B) Rolling-horizon – wymagaj wykonalności okna (po ochronie CH/BC)
+        private List<int> FilterByRollingFeasibility(int day, List<int> cand)
+        {
+            for (int K = RH_MIN_K; K <= RH_MAX_K; K++)
+            {
+                var ok = new List<int>(cand.Count);
+                foreach (var p in cand)
+                    if (ExistsFullWindow(day, p, K)) ok.Add(p);
+
+                if (ok.Count > 0)
+                {
+                    SolverDiagnostics.Log($"[RH] {ok.Count}/{cand.Count} kandydatów przechodzi okno K={K}.");
+                    return ok;
+                }
+            }
+            return new List<int>();
+        }
+
+        // (C) CRP – preferuj kandydata maksymalizującego gwarantowany prefiks w oknie
+        private List<int> OrderByCRP(int day, List<int> cand, int K)
+        {
+            var scored = new List<(int doc, int pref)>(cand.Count);
+            foreach (var p in cand)
+            {
+                int len = MaxWindowPrefix(day, p, K);
+                scored.Add((p, len));
+            }
+            scored.Sort((x, y) =>
+            {
+                if (x.pref != y.pref) return y.pref.CompareTo(x.pref);
+                // remis: tie-break wg miękkich priorytetów i preferencji
+                return CompareCandidates(day, x.doc, y.doc);
+            });
+            var ordered = new List<int>(scored.Count);
+            foreach (var s in scored) ordered.Add(s.doc);
+            SolverDiagnostics.Log($"[CRP] Kolejność po CRP: {string.Join(", ", ordered.ConvertAll(i => _docs[i].Symbol))}");
+            return ordered;
+        }
+
+        // ====== Kontekst okna RH/CRP ======
+        private sealed class WinCtx
+        {
+            public List<int> Days = new();
+            public Dictionary<int, int> PosByDay = new();
+            public int[] LocalAssign = Array.Empty<int>();  // pos -> doc or UNASSIGNED
+            public int[] LocalWorkInc = Array.Empty<int>(); // per doc
+            public int[] LocalMwInc = Array.Empty<int>();   // per doc
+        }
+
+        private bool ExistsFullWindow(int day, int forcedDoc, int K)
+        {
+            int end = Math.Min(_days.Count - 1, day + K);
+            var ctx = NewWindowCtx(day, end);
+
+            int pos0 = ctx.PosByDay[day];
+            if (!TryPlaceInWindow(ctx, pos0, forcedDoc, forced: true))
+                return false;
+
+            return WindowDFS_AllAssigned(ctx);
+        }
+
+        private int MaxWindowPrefix(int day, int forcedDoc, int K)
+        {
+            int end = Math.Min(_days.Count - 1, day + K);
+            var ctx = NewWindowCtx(day, end);
+
+            int pos0 = ctx.PosByDay[day];
+            if (!TryPlaceInWindow(ctx, pos0, forcedDoc, forced: true))
+                return 0;
+
+            return WindowDFS_MaxPrefix(ctx);
+        }
+
+        private WinCtx NewWindowCtx(int start, int end)
+        {
+            var ctx = new WinCtx();
+            for (int d = start; d <= end; d++)
+            {
+                ctx.PosByDay[d] = ctx.Days.Count;
+                ctx.Days.Add(d);
+            }
+            ctx.LocalAssign = Enumerable.Repeat(UNASSIGNED, ctx.Days.Count).ToArray();
+            ctx.LocalWorkInc = new int[_docs.Count];
+            ctx.LocalMwInc = new int[_docs.Count];
+            return ctx;
+        }
+
+        private bool WindowDFS_AllAssigned(WinCtx ctx)
+        {
+            _token.ThrowIfCancellationRequested();
+
+            int bestPos = -1, bestCnt = int.MaxValue;
+            List<int>? bestCands = null;
+
+            // MRV w oknie
+            for (int pos = 0; pos < ctx.Days.Count; pos++)
+            {
+                if (ctx.LocalAssign[pos] != UNASSIGNED) continue;
+
+                int d = ctx.Days[pos];
+                if (_assign[d] != UNASSIGNED)
+                {
+                    var fixedDoc = _assign[d];
+                    if (!TryPlaceInWindow(ctx, pos, fixedDoc, forced: true)) return false;
+                    continue;
+                }
+
+                var cand = WindowCandidates(ctx, pos);
+                int c = cand.Count;
+                if (c == 0) return false;
+                if (c < bestCnt)
+                {
+                    bestCnt = c; bestPos = pos; bestCands = cand;
+                    if (bestCnt <= 1) break;
+                }
+            }
+
+            bool allAssigned = true;
+            for (int pos = 0; pos < ctx.Days.Count; pos++)
+                if (ctx.LocalAssign[pos] == UNASSIGNED) { allAssigned = false; break; }
+            if (allAssigned) return true;
+
+            Debug.Assert(bestPos >= 0 && bestCands != null);
+
+            // Priorytet CH/BC w oknie (tie-break)
+            bestCands.Sort((a, b) =>
+            {
+                int ra = PrefRank(_pref[ctx.Days[bestPos], a]);
+                int rb = PrefRank(_pref[ctx.Days[bestPos], b]);
+                if (ra != rb) return rb.CompareTo(ra);
+
+                double fa = RatioAfterWithLocal(a, ctx.LocalWorkInc[a]);
+                double fb = RatioAfterWithLocal(b, ctx.LocalWorkInc[b]);
+                int cmp = fa.CompareTo(fb);
+                if (cmp != 0) return cmp;
+
+                int da = NearestAssignedDistanceGlobal(ctx.Days[bestPos], a);
+                int db = NearestAssignedDistanceGlobal(ctx.Days[bestPos], b);
+                return db.CompareTo(da);
+            });
+
+            foreach (var doc in bestCands)
+            {
+                if (!TryPlaceInWindow(ctx, bestPos, doc, forced: false)) continue;
+                if (WindowDFS_AllAssigned(ctx)) return true;
+                UndoPlaceInWindow(ctx, bestPos, doc);
+            }
+            return false;
+        }
+
+        private int WindowDFS_MaxPrefix(WinCtx ctx)
+        {
+            _token.ThrowIfCancellationRequested();
+
+            int start = ctx.Days[0];
+            int end = ctx.Days[^1];
+            int best = 0;
+
+            void DFS()
+            {
+                // Znajdź pierwszy nieprzydzielony w oknie
+                int nextPos = -1;
+                for (int i = 0; i < ctx.Days.Count; i++)
+                {
+                    if (ctx.LocalAssign[i] == UNASSIGNED) { nextPos = i; break; }
+                }
+
+                if (nextPos == -1)
+                {
+                    best = Math.Max(best, end - start + 1);
+                    return;
+                }
+
+                // Aktualny prefiks od startu
+                int cur = 0;
+                for (int d = start; d <= end; d++)
+                {
+                    int p = ctx.PosByDay[d];
+                    int g = GetDocAssignedConsideringWindow(ctx, d);
+                    if (g >= 0 || (_assign[d] >= 0)) cur++;
+                    else break;
+                }
+                if (cur > best) best = cur;
+
+                int dday = ctx.Days[nextPos];
+                if (_assign[dday] != UNASSIGNED)
+                {
+                    var fixedDoc = _assign[dday];
+                    if (TryPlaceInWindow(ctx, nextPos, fixedDoc, forced: true))
+                    {
+                        DFS();
+                        UndoPlaceInWindow(ctx, nextPos, fixedDoc);
+                    }
+                    return;
+                }
+
+                var cand = WindowCandidates(ctx, nextPos);
+                if (cand.Count == 0) return;
+
+                cand.Sort((a, b) =>
+                {
+                    int ra = PrefRank(_pref[dday, a]);
+                    int rb = PrefRank(_pref[dday, b]);
                     if (ra != rb) return rb.CompareTo(ra);
-
-                    int fca = FutureChceFeasibleCount(day, a, CH_RESERVE_HORIZON_DAYS);
-                    int fcb = FutureChceFeasibleCount(day, b, CH_RESERVE_HORIZON_DAYS);
-                    if (fca != fcb) return fca.CompareTo(fcb);
-
-                    int wla = _work[a], wlb = _work[b];
-                    if (wla != wlb) return wla.CompareTo(wlb);
-
-                    int remA = _limit[a] - _work[a];
-                    int remB = _limit[b] - _work[b];
-                    if (remA != remB) return remA.CompareTo(remB);
-
-                    return a.CompareTo(b);
+                    double fa = RatioAfterWithLocal(a, ctx.LocalWorkInc[a]);
+                    double fb = RatioAfterWithLocal(b, ctx.LocalWorkInc[b]);
+                    int cmp = fa.CompareTo(fb);
+                    if (cmp != 0) return cmp;
+                    int da = NearestAssignedDistanceGlobal(dday, a);
+                    int db = NearestAssignedDistanceGlobal(dday, b);
+                    return db.CompareTo(da);
                 });
 
-                foreach (int p in phase)
+                foreach (var doc in cand)
                 {
-                    var av = (TypDostepnosci)_av[day, p];
-                    SolverDiagnostics.Log($"PRÓBA: {FmtDay(day)} ← {FmtDoc(p)} ({FmtPref(av)}), pracuje={_work[p]}, limit={_limit[p]}");
-
-                    Make(day, p);
-
-                    if (!ForwardFeasibleAfter(day, p, av, contActive, out string? reasonF, out _))
-                    {
-                        SolverDiagnostics.Log($"Odrzucono: forward-check fail → {reasonF}");
-                        Unmake(day);
-                        continue;
-                    }
-
-                    if (!WindowFeasibleAfter(day, p, av, contActive, out string? reasonW, out int deficit))
-                    {
-                        if (deficit > 0 && deficit <= SMALL_DEFICIT_MAX && TrySpendBlankIfSmallDeficit(day, reasonW, deficit, contActive))
-                        {
-                            // potraktuj jak przechodzące (pokryto kredytem pustek)
-                            progressed = true;
-                            DFS();
-                            Unmake(day);
-                            continue;
-                        }
-                        else
-                        {
-                            anyWindowSmallDeficit |= (deficit > 0 && deficit <= SMALL_DEFICIT_MAX);
-                            SolverDiagnostics.Log($"Odrzucono: okno nie do przejścia → {reasonW}");
-                            Unmake(day);
-                            continue;
-                        }
-                    }
-
-                    // OK – schodzimy w głąb
-                    progressed = true;
-                    SolverDiagnostics.Log("Akceptuję i schodzę głębiej.");
+                    if (!TryPlaceInWindow(ctx, nextPos, doc, forced: false)) continue;
                     DFS();
-                    Unmake(day);
+                    UndoPlaceInWindow(ctx, nextPos, doc);
                 }
-
-                if (progressed) break; // jeśli faza 1 dała wejście, nie schodzimy do fazy 2
             }
 
-            // 3) PUSTO – kiedy?
-            bool contNow = IsContinuityActive();
-            if (!progressed)
-            {
-                SolverDiagnostics.Log($"PRÓBA: {FmtDay(day)} ← PUSTO (wszyscy kandydaci odrzuceni)");
-                Make(day, -1);
-                DFS();
-                Unmake(day);
-            }
-            else if (contNow && legalAll.Count > 0 && anyWindowSmallDeficit && _blankCreditsUsed < _blankCreditsTotal)
-            {
-                SolverDiagnostics.Log($"PRÓBA: {FmtDay(day)} ← PUSTO (ciągłość aktywna, małe deficyty okna, wolny kredyt pustki {_blankCreditsUsed + 1}/{_blankCreditsTotal})");
-                Make(day, -1);
-                DFS();
-                Unmake(day);
-            }
-            else
-            {
-                if (contNow && legalAll.Count > 0)
-                    SolverDiagnostics.Log($"POMINIĘTO „PUSTO” (ciągłość aktywna i brak potrzeby/limitu na pustkę).");
-            }
+            DFS();
+            return best;
         }
 
-        // === Pomocnicze: wybór dnia, legalność, forward, okno, itd. ===
-
-        // Czy ciągłość od początku jest nadal „spójna” (bez dziur)?
-        private bool IsContinuityActive()
+        private List<int> WindowCandidates(WinCtx ctx, int pos)
         {
-            int earliest = EarliestUnassigned();
-            if (earliest < 0) return false;
-            // _prefx = liczba dni od początku obsadzonych realnie (nie PUSTO)
-            // ciągłość aktywna wtedy, gdy nie ma PUSTO przed earliest → _prefx == earliest
-            return _prefx == earliest;
+            int d = ctx.Days[pos];
+            var res = new List<int>(_docs.Count);
+            for (int p = 0; p < _docs.Count; p++)
+                if (IsFeasibleInWindow(ctx, pos, p)) res.Add(p);
+            return res;
         }
 
-        private int NextDayByStrategy(out bool continuityActive)
+        private bool IsFeasibleInWindow(WinCtx ctx, int pos, int doc)
         {
-            continuityActive = IsContinuityActive();
-            if (continuityActive) return EarliestUnassigned();
-            return NextDayByMRV();
-        }
+            int d = ctx.Days[pos];
+            byte av = _pref[d, doc];
 
-        private int EarliestUnassigned()
-        {
-            for (int d = 0; d < _days; d++) if (_assign[d] == UNASSIGNED) return d;
-            return -1;
-        }
+            if (av == PREF_NONE || av == PREF_OD) return false; // OD jako „dzień inny” (sam dzień) – nie stajemy na OD
 
-        private int NextDayByMRV()
-        {
-            int best = -1, bestCnt = int.MaxValue, bestBC = int.MaxValue, bestCh = int.MaxValue, bestIndex = int.MaxValue;
+            int used = _work[doc] + ctx.LocalWorkInc[doc];
+            if (used >= _limitsByDoc[doc]) return false;
 
-            for (int d = 0; d < _days; d++)
+            if (av == PREF_MW && (_mwUsed[doc] + ctx.LocalMwInc[doc]) >= 1) return false;
+
+            bool isBC = (av == PREF_BC);
+
+            // Zakaz dzień-po-dniu: BC może łamać
+            if (!isBC)
             {
-                if (_assign[d] != UNASSIGNED) continue;
-
-                int cnt = 0, bcCnt = 0, chCnt = 0;
-                foreach (var p in _staticCands[d])
+                int prev = d - 1, next = d + 1;
+                if (prev >= 0)
                 {
-                    if (IsValidDynamic(d, p, ignoreChceReserve: false))
+                    int prevDoc = GetDocAssignedConsideringWindow(ctx, prev);
+                    if (prevDoc == doc) return false;
+                }
+                if (next < _days.Count)
+                {
+                    int nextDoc = GetDocAssignedConsideringWindow(ctx, next);
+                    if (nextDoc == doc) return false;
+                }
+            }
+
+            // Sąsiedztwo „Inny dyżur” ±1: **BC może łamać** (MG/CH/MW nie mogą)
+            if (!isBC)
+            {
+                int pv = d - 1, nx = d + 1;
+                if (pv >= 0 && _pref[pv, doc] == PREF_OD) return false;
+                if (nx < _days.Count && _pref[nx, doc] == PREF_OD) return false;
+            }
+
+            return true;
+        }
+
+        private int GetDocAssignedConsideringWindow(WinCtx ctx, int dayIdx)
+        {
+            if (_assign[dayIdx] >= 0) return _assign[dayIdx];
+            if (ctx.PosByDay.TryGetValue(dayIdx, out int pos))
+            {
+                int local = ctx.LocalAssign[pos];
+                return local >= 0 ? local : -2;
+            }
+            return -2;
+        }
+
+        private bool TryPlaceInWindow(WinCtx ctx, int pos, int doc, bool forced)
+        {
+            int d = ctx.Days[pos];
+
+            if (!forced && _assign[d] >= 0 && _assign[d] != doc) return false;
+
+            if (!IsFeasibleInWindow(ctx, pos, doc)) return false;
+
+            ctx.LocalAssign[pos] = doc;
+            ctx.LocalWorkInc[doc]++;
+            if (_pref[d, doc] == PREF_MW) ctx.LocalMwInc[doc]++;
+            return true;
+        }
+
+        private void UndoPlaceInWindow(WinCtx ctx, int pos, int doc)
+        {
+            int d = ctx.Days[pos];
+            ctx.LocalAssign[pos] = UNASSIGNED;
+            ctx.LocalWorkInc[doc]--;
+            if (_pref[d, doc] == PREF_MW) ctx.LocalMwInc[doc]--;
+        }
+
+        private double RatioAfterWithLocal(int doc, int localInc)
+        {
+            double lim = Math.Max(1, _limitsByDoc[doc]);
+            return (_work[doc] + localInc + 1) / lim;
+        }
+
+        // ====== Lokalna naprawa ======
+        private void TryLocalRepairAround(int holeDay)
+        {
+            _token.ThrowIfCancellationRequested();
+
+            int bestPrefixLen = CurrentPrefixLengthFast();
+            int appliedBack = 0;
+
+            int budgetMs = GetLocalRepairBudgetMs();
+            var swGlobal = Stopwatch.StartNew();
+
+            for (int back = LR_MIN_BACK; back <= LR_MAX_BACK; back++)
+            {
+                if (swGlobal.ElapsedMilliseconds > budgetMs) break;
+
+                int start = Math.Max(0, holeDay - back);
+                int end = Math.Min(_days.Count - 1, holeDay + LR_FWD);
+
+                SolverDiagnostics.Log($"[LocalRepair] Okno: {FormatDay(start)}..{FormatDay(end)} (dziura: {FormatDay(holeDay)}, back={back})");
+
+                var snapAssign = (int[])_assign.Clone();
+                var snapWork = (int[])_work.Clone();
+                var snapMw = (int[])_mwUsed.Clone();
+                int snapFilled = _assignedFilled;
+                bool snapPrefix = _isPrefixActive;
+                int snapPrefixHole = _prefixFirstHole;
+
+                // wyczyść okno
+                for (int d = start; d <= end; d++)
+                {
+                    if (_assign[d] >= 0)
                     {
-                        cnt++;
-                        var av = (TypDostepnosci)_av[d, p];
-                        if (av == TypDostepnosci.BardzoChce) bcCnt++;
-                        else if (av == TypDostepnosci.Chce) chCnt++;
+                        int who = _assign[d];
+                        byte code = _pref[d, who];
+                        Unplace(d, who, code);
+                        _assign[d] = UNASSIGNED;
                     }
+                    else if (_assign[d] == EMPTY) _assign[d] = UNASSIGNED;
                 }
-                if (cnt == 0) cnt = int.MaxValue / 2;
+                _isPrefixActive = false;
 
-                bool better = (cnt < bestCnt)
-                           || (cnt == bestCnt && bcCnt < bestBC)
-                           || (cnt == bestCnt && bcCnt == bestBC && chCnt < bestCh)
-                           || (cnt == bestCnt && bcCnt == bestBC && chCnt == bestCh && d < bestIndex);
+                var sw = Stopwatch.StartNew();
+                int localBudget = Math.Max(350, Math.Min(1000, budgetMs / 2));
+                long[]? bestLocalScore = null;
+                int[]? bestLocalAssign = null;
+                int bestLocalPrefix = bestPrefixLen;
+                int nodes = 0;
 
-                if (better) { best = d; bestCnt = cnt; bestBC = bcCnt; bestCh = chCnt; bestIndex = d; }
-            }
-            return best >= 0 ? best : 0;
-        }
-
-        private List<int> CollectLegal(int day, bool continuityActive)
-        {
-            var legal = new List<int>(_staticCands[day].Count);
-            bool ignoreChReserveHere = continuityActive && (day == EarliestUnassigned());
-
-            foreach (var p in _staticCands[day])
-            {
-                if (IsValidDynamic(day, p, ignoreChReserveHere))
-                    legal.Add(p);
-            }
-            return legal;
-        }
-
-        private void Make(int day, int p)
-        {
-            _assign[day] = p; _assignedCount++;
-            if (p >= 0)
-            {
-                _obs++; _work[p]++;
-                if ((TypDostepnosci)_av[day, p] == TypDostepnosci.MogeWarunkowo) _mwCount[p]++;
-            }
-            else
-            {
-                // PUSTO – sam ruch PUSTO nie zużywa kredytu automatycznie
-            }
-            RecomputePrefix();
-        }
-
-        private void Unmake(int day)
-        {
-            int cur = _assign[day];
-            _assign[day] = UNASSIGNED; _assignedCount--;
-            if (cur >= 0)
-            {
-                _obs--; _work[cur]--;
-                if ((TypDostepnosci)_av[day, cur] == TypDostepnosci.MogeWarunkowo && _mwCount[cur] > 0) _mwCount[cur]--;
-            }
-            RecomputePrefix();
-        }
-
-        private void RecomputePrefix()
-        {
-            int k = 0;
-            while (k < _days)
-            {
-                int a = _assign[k];
-                if (a == UNASSIGNED || a == -1) break; // PUSTO przerywa ciągłość
-                k++;
-            }
-            _prefx = k;
-        }
-
-        private bool IsValidDynamic(int day, int p, bool ignoreChceReserve)
-        {
-            if (p < 0 || p >= _docs) return false;
-            if (_work[p] >= _limit[p]) return false;
-
-            var av = (TypDostepnosci)_av[day, p];
-            bool bc = av == TypDostepnosci.BardzoChce;
-
-            // Zakaz dni dzień-po-dniu + sąsiedztwo „Dyzur (inny)” – chyba że BC
-            if (!bc)
-            {
-                if (day > 0 && _assign[day - 1] == p) return false;
-                if (day + 1 < _days && _assign[day + 1] == p) return false;
-                if (_nextToOther[day, p]) return false;
-            }
-
-            // twarde wykluczenia
-            if (av == TypDostepnosci.Niedostepny || av == TypDostepnosci.Urlop || av == TypDostepnosci.DyzurInny) return false;
-
-            // MW = maksymalnie 1 na lekarza
-            if (av == TypDostepnosci.MogeWarunkowo && _mwCount[p] >= 1) return false;
-
-            // Rezerwa „Chcę”: jeśli dziś tylko „Mogę/MW”, staramy się nie zjadać limitu,
-            // jeżeli w najbliższych CH_RESERVE_HORIZON_DAYS są realne „CH” i pojemność by nie wystarczyła.
-            if (!ignoreChceReserve && (av == TypDostepnosci.Moge || av == TypDostepnosci.MogeWarunkowo))
-            {
-                if (UniqueFutureFeasibleExists(day, p)) return false;
-
-                int needChce = FutureChceFeasibleCount(day, p, CH_RESERVE_HORIZON_DAYS);
-                if (needChce > 0)
+                void DFS(int d)
                 {
-                    int remainingAfter = _limit[p] - _work[p] - 1;
-                    if (remainingAfter < needChce) return false;
-                }
-            }
-            return true;
-        }
+                    if (sw.ElapsedMilliseconds > localBudget) return;
+                    _token.ThrowIfCancellationRequested();
 
-        private bool ForwardFeasibleAfter(int chosenDay, int chosenDoctor, TypDostepnosci avChosen, bool continuityActive,
-                                          out string? reason, out int dummy)
-        {
-            // Tutaj nie mierzymy deficytu – zwracamy 0 jako „dummy”
-            dummy = 0;
-            reason = null;
-            if (chosenDoctor < 0) return true;
-
-            int earliest = EarliestUnassigned();
-            bool ignoreChReserveForEarliest = continuityActive;
-
-            // POPRAWKA: bez nazwanego parametru (żeby uniknąć CS1739)
-            bool Check(int d) => CheckDayHasAnyCandidate(d, ignoreChReserveForEarliest && d == earliest);
-
-            if (!Check(chosenDay - 1)) { reason = $"brak kandydata dla dnia {FmtDay(chosenDay - 1)} po przydziale"; return false; }
-            if (!Check(chosenDay + 1)) { reason = $"brak kandydata dla dnia {FmtDay(chosenDay + 1)} po przydziale"; return false; }
-
-            // nie zjedz limitu potrzebnego na przyszłe „CH” (krótki horyzont)
-            if (avChosen == TypDostepnosci.Moge || avChosen == TypDostepnosci.MogeWarunkowo)
-            {
-                int futureChce = FutureChceFeasibleCount(chosenDay, chosenDoctor, CH_RESERVE_HORIZON_DAYS);
-                int remaining = _limit[chosenDoctor] - _work[chosenDoctor];
-                if (remaining < futureChce)
-                {
-                    reason = $"po przydziale braknie limitu na przyszłe „Chcę” ({futureChce}) dla {FmtDoc(chosenDoctor)}";
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        private bool CheckDayHasAnyCandidate(int d, bool ignoreChceReserve)
-        {
-            if (d < 0 || d >= _days) return true;
-            if (_assign[d] != UNASSIGNED) return true;
-
-            foreach (var p in _staticCands[d])
-                if (IsValidDynamic(d, p, ignoreChceReserve)) return true;
-
-            return false;
-        }
-
-        // Czy istnieje w przyszłości dzień, gdzie TYLKO ten lekarz jest realny (dowolna deklaracja != wykluczona)?
-        private bool UniqueFutureFeasibleExists(int fromDay, int p)
-        {
-            for (int d = fromDay + 1; d < _days; d++)
-            {
-                if (_assign[d] != UNASSIGNED) continue;
-                if (!FeasibleFor(p, d)) continue;
-
-                bool anyOther = false;
-                foreach (var q in _staticCands[d])
-                {
-                    if (q == p) continue;
-                    if (FeasibleFor(q, d)) { anyOther = true; break; }
-                }
-                if (!anyOther) return true;
-            }
-            return false;
-        }
-
-        // Ile przyszłych dni „Chcę” dla p jest REALNIE wykonalnych – w krótkim horyzoncie (hDays)?
-        private int FutureChceFeasibleCount(int fromDay, int p, int hDays)
-        {
-            int need = 0;
-            int end = Math.Min(_days - 1, fromDay + hDays);
-            for (int d = fromDay + 1; d <= end; d++)
-            {
-                if (_assign[d] != UNASSIGNED) continue;
-
-                var av = (TypDostepnosci)_av[d, p];
-                if (av != TypDostepnosci.Chce) continue;
-
-                // lokalna wykonalność dla „Chcę”
-                if (d > 0 && _assign[d - 1] == p) continue;
-                if (d + 1 < _days && _assign[d + 1] == p) continue;
-                if (_nextToOther[d, p]) continue;
-
-                need++;
-            }
-            return need;
-        }
-
-        private bool FeasibleFor(int p, int day)
-        {
-            if (_work[p] >= _limit[p]) return false;
-            var av = (TypDostepnosci)_av[day, p];
-            if (av == TypDostepnosci.Niedostepny || av == TypDostepnosci.Urlop || av == TypDostepnosci.DyzurInny) return false;
-
-            bool bc = av == TypDostepnosci.BardzoChce;
-            if (!bc)
-            {
-                if (day > 0 && _assign[day - 1] == p) return false;
-                if (day + 1 < _days && _assign[day + 1] == p) return false;
-                if (_nextToOther[day, p]) return false;
-            }
-
-            if (av == TypDostepnosci.MogeWarunkowo && _mwCount[p] >= 1) return false; // drugie MW – zabronione
-            return true;
-        }
-
-        private bool WindowFeasibleAfter(int chosenDay, int chosenDoctor, TypDostepnosci avChosen, bool continuityActive,
-                                         out string? reason, out int deficit)
-        {
-            reason = null;
-            deficit = 0;
-
-            // Okno stosujemy głównie przy utrzymaniu prefiksu (ciągłości) i dla „miękkich” deklaracji
-            if (!continuityActive && !(avChosen == TypDostepnosci.Chce || avChosen == TypDostepnosci.Moge || avChosen == TypDostepnosci.MogeWarunkowo))
-                return true;
-
-            int start = EarliestUnassigned();
-            if (start < 0) return true;
-
-            // Adaptacyjna szerokość okna
-            int win = AdaptMatchWindow(start, Math.Max(start, chosenDay));
-            int end = Math.Min(_days - 1, Math.Max(start, chosenDay) + win - 1);
-
-            var days = new List<int>();
-            for (int d = start; d <= end; d++) if (_assign[d] == UNASSIGNED) days.Add(d);
-            if (days.Count == 0) return true;
-
-            // policz kandydatów wykonalnych w oknie
-            int[] feasCnt = new int[days.Count];
-            for (int i = 0; i < days.Count; i++)
-            {
-                int d = days[i];
-                int cnt = 0;
-                foreach (var p in _staticCands[d]) if (FeasibleFor(p, d)) cnt++;
-                feasCnt[i] = cnt;
-            }
-
-            // liczba dni, które „muszą” być obsadzone w prefiksie okna
-            int prefixNeed = 0;
-            for (int i = 0; i < days.Count; i++)
-            {
-                if (feasCnt[i] == 0) break;
-                prefixNeed++;
-            }
-            if (prefixNeed <= 0) return true;
-
-            int sumCap = 0;
-            for (int p = 0; p < _docs; p++)
-            {
-                int cap = _limit[p] - _work[p]; if (cap <= 0) continue;
-                int feas = 0;
-                for (int i = 0; i < days.Count; i++)
-                {
-                    int d = days[i];
-                    if (FeasibleFor(p, d)) feas++;
-                }
-                if (feas > 0) sumCap += Math.Min(cap, feas);
-            }
-
-            if (sumCap < prefixNeed)
-            {
-                deficit = prefixNeed - sumCap;
-                reason = $"suma pojemności {sumCap} < prefiks okna {prefixNeed} (deficyt {deficit}, okno={win})";
-                return false;
-            }
-
-            // Dokładniejszy test max-flow (z limitem = prefixNeed)
-            var dinic = new Dinic();
-            int S = dinic.AddNode();
-            int T = dinic.AddNode();
-
-            int[] docNode = new int[_docs];
-            for (int p = 0; p < _docs; p++)
-            {
-                int cap = _limit[p] - _work[p];
-                if (cap <= 0) { docNode[p] = -1; continue; }
-                int feas = 0;
-                for (int i = 0; i < days.Count; i++) if (FeasibleFor(p, days[i])) feas++;
-                if (feas == 0) { docNode[p] = -1; continue; }
-
-                docNode[p] = dinic.AddNode();
-                dinic.AddEdge(S, docNode[p], Math.Min(cap, feas));
-            }
-
-            int[] dayNode = new int[days.Count];
-            for (int i = 0; i < days.Count; i++)
-            {
-                dayNode[i] = dinic.AddNode();
-                dinic.AddEdge(dayNode[i], T, 1);
-            }
-
-            for (int p = 0; p < _docs; p++)
-            {
-                if (docNode[p] < 0) continue;
-                for (int i = 0; i < days.Count; i++)
-                {
-                    int d = days[i];
-                    if (FeasibleFor(p, d)) dinic.AddEdge(docNode[p], dayNode[i], 1);
-                }
-            }
-
-            int flow = dinic.MaxFlow(S, T, limit: prefixNeed);
-            if (flow < prefixNeed)
-            {
-                deficit = prefixNeed - flow;
-                reason = $"max-flow={flow} < wymagany prefiks={prefixNeed} (deficyt {deficit}, okno={win})";
-                return false;
-            }
-            return true;
-        }
-
-        private int AdaptMatchWindow(int start, int anchor)
-        {
-            // Prosta adaptacja: licz średnią „liczbę wykonalnych kandydatów” w najbliższych 7 dniach
-            int look = Math.Min(_days - 1, anchor + 6);
-            int totalDays = 0;
-            int totalFeas = 0;
-            for (int d = start; d <= look; d++)
-            {
-                if (_assign[d] != UNASSIGNED) continue;
-                totalDays++;
-                int cnt = 0;
-                foreach (var p in _staticCands[d]) if (FeasibleFor(p, d)) cnt++;
-                totalFeas += cnt;
-            }
-            if (totalDays == 0) return MATCH_WINDOW_BASE;
-
-            double avg = totalFeas / (double)totalDays;
-            int win = MATCH_WINDOW_BASE;
-            if (avg < 1.5) win = Math.Min(MATCH_WINDOW_MAX, MATCH_WINDOW_BASE + 2);
-            else if (avg > 3.5) win = Math.Max(MATCH_WINDOW_MIN, MATCH_WINDOW_BASE - 2);
-            return win;
-        }
-
-        private bool TrySpendBlankIfSmallDeficit(int day, string? reasonW, int deficit, bool continuityActive)
-        {
-            if (!continuityActive) return false;
-            if (deficit <= 0 || deficit > SMALL_DEFICIT_MAX) return false;
-            if (_blankCreditsUsed >= _blankCreditsTotal) return false;
-
-            _blankCreditsUsed++;
-            SolverDiagnostics.Log($"[PUSTKA-KREDYT] deficyt={deficit} pokryty → wykorzystane pustki: {_blankCreditsUsed}/{_blankCreditsTotal} (dzień {FmtDay(day)}), powód: {reasonW}");
-            // UWAGA: nie zmieniamy stanu przydziałów tutaj – ta metoda tylko pozwala „przepuścić” test okna
-            return true;
-        }
-
-        private bool CanBeatBestUB()
-        {
-            if (_prio.Count == 0 || _prio[0] != SolverPriority.LacznaLiczbaObsadzonychDni) return true;
-
-            int remDays = _days - _assignedCount;
-            int remCap = 0;
-            for (int p = 0; p < _docs; p++) remCap += Math.Max(0, _limit[p] - _work[p]);
-            int ubObs = _obs + Math.Min(remDays, Math.Max(0, remCap));
-
-            long bestFirst;
-            lock (_bestLock) bestFirst = _bestVec.Length > 0 ? _bestVec[0] : long.MinValue;
-            return ubObs >= bestFirst;
-        }
-
-        private void SubmitBest()
-        {
-            var sol = new RozwiazanyGrafik();
-            for (int d = 0; d < _days; d++)
-            {
-                var date = _in.DniWMiesiacu[d];
-                int p = _assign[d];
-                sol.Przypisania[date] = (p >= 0 ? _docsMap[p] : null);
-            }
-
-            var vec = EvaluationAndScoringService.ToIntVector(sol, _prio);
-            TryUpdateBest(_assign, vec);
-        }
-
-        private void TryUpdateBest(int[] assignCandidate, long[] vecCandidate)
-        {
-            lock (_bestLock)
-            {
-                if (_bestVec.Length == 0 || LexGreater(vecCandidate, _bestVec))
-                {
-                    _bestVec = (long[])vecCandidate.Clone();
-                    _bestAssign = (int[])assignCandidate.Clone();
-                    SolverDiagnostics.Log($"Nowy najlepszy wektor oceny: [{string.Join(", ", _bestVec)}], prefiks={_prefx}, obsadzonych={_obs}/{_days}, pustki={_blankCreditsUsed}/{_blankCreditsTotal}");
-                }
-            }
-        }
-
-        private (int[] assign, long[] vec) BuildGreedyIncumbent()
-        {
-            // Prosty rozbieg: MRV + ta sama logika legalności, ale bez kosztownego okna (tylko lokalne warunki).
-            var assign = new int[_days]; Array.Fill(assign, UNASSIGNED);
-            var work = new int[_docs];
-            var mw = new int[_docs];
-            int assigned = 0, obs = 0;
-
-            bool IsValidLocal(int day, int p)
-            {
-                if (p < 0 || p >= _docs) return false;
-                if (work[p] >= _limit[p]) return false;
-
-                var av = (TypDostepnosci)_av[day, p];
-                bool bc = av == TypDostepnosci.BardzoChce;
-
-                if (!bc)
-                {
-                    if (day > 0 && assign[day - 1] == p) return false;
-                    if (day + 1 < _days && assign[day + 1] == p) return false;
-                    if (_nextToOther[day, p]) return false;
-                }
-
-                if (av == TypDostepnosci.Niedostepny || av == TypDostepnosci.Urlop || av == TypDostepnosci.DyzurInny) return false;
-                if (av == TypDostepnosci.MogeWarunkowo && mw[p] >= 1) return false;
-
-                if (av == TypDostepnosci.Moge || av == TypDostepnosci.MogeWarunkowo)
-                {
-                    int fut = 0;
-                    int end = Math.Min(_days - 1, day + CH_RESERVE_HORIZON_DAYS);
-                    for (int d = day + 1; d <= end; d++)
+                    while (d <= end && _assign[d] != UNASSIGNED) d++;
+                    if (d > end)
                     {
-                        if (assign[d] != UNASSIGNED) continue;
-                        var a2 = (TypDostepnosci)_av[d, p];
-                        if (a2 != TypDostepnosci.Chce) continue;
-                        if (work[p] >= _limit[p]) break;
-                        if (d > 0 && assign[d - 1] == p) continue;
-                        if (d + 1 < _days && assign[d + 1] == p) continue;
-                        if (_nextToOther[d, p]) continue;
-                        fut++;
-                    }
-                    if (fut > 0 && (_limit[p] - work[p] - 1) < fut) return false;
-                }
-                return true;
-            }
-
-            int NextByMRVLocal()
-            {
-                int best = -1, bestCnt = int.MaxValue, bestBC = int.MaxValue, bestCh = int.MaxValue, bestIndex = int.MaxValue;
-                for (int d = 0; d < _days; d++)
-                {
-                    if (assign[d] != UNASSIGNED) continue;
-                    int cnt = 0, bcCnt = 0, chCnt = 0;
-                    foreach (var p in _staticCands[d])
-                    {
-                        if (IsValidLocal(d, p))
+                        int pref = CurrentPrefixLengthFast();
+                        if (pref > bestLocalPrefix)
                         {
-                            cnt++;
-                            var av = (TypDostepnosci)_av[d, p];
-                            if (av == TypDostepnosci.BardzoChce) bcCnt++;
-                            else if (av == TypDostepnosci.Chce) chCnt++;
+                            bestLocalPrefix = pref;
+                            bestLocalAssign = (int[])_assign.Clone();
+                            bestLocalScore = null;
+                            SolverDiagnostics.Log($"[LocalRepair] Lepszy prefiks: {pref}");
+                        }
+                        else if (pref == bestLocalPrefix)
+                        {
+                            var sol = SnapshotToSolution();
+                            var sc = EvaluateSolution(sol);
+                            if (bestLocalScore == null || LexGreater(sc, bestLocalScore))
+                            {
+                                bestLocalAssign = (int[])_assign.Clone();
+                                bestLocalScore = sc;
+                                SolverDiagnostics.Log($"[LocalRepair] Lepszy kandydat (remis prefiksu): vec={FormatScore(sc)}");
+                            }
+                        }
+                        return;
+                    }
+
+                    nodes++;
+                    var cand = OrderCandidates(d);
+
+                    // mini-prefiks w oknie: ochrona CH/BC i RH + CRP też mają sens
+                    if (_priorities.Count > 0 && _priorities[0] == SolverPriority.CiagloscPoczatkowa)
+                    {
+                        cand = FilterByCoverBalance(d, cand, CH_PROTECT_K);
+                        var ok = FilterByRollingFeasibility(d, cand);
+                        if (ok.Count > 0) cand = OrderByCRP(d, ok, RH_MAX_K);
+                        else cand.Clear();
+                    }
+
+                    if (cand.Count == 0)
+                    {
+                        PlaceEmpty(d);
+                        DFS(d + 1);
+                        UnplaceEmpty(d);
+                        return;
+                    }
+
+                    foreach (var doc in cand)
+                    {
+                        if (!IsHardFeasible(d, doc)) continue;
+                        Place(d, doc, out var code);
+                        DFS(d + 1);
+                        Unplace(d, doc, code);
+                        if (sw.ElapsedMilliseconds > localBudget) break;
+                    }
+                }
+
+                try { DFS(start); }
+                finally
+                {
+                    SolverDiagnostics.Log($"[LocalRepair] Węzły={nodes}, czas={sw.ElapsedMilliseconds} ms.");
+                }
+
+                if (bestLocalAssign != null && bestLocalPrefix > bestPrefixLen)
+                {
+                    Array.Copy(bestLocalAssign, _assign, _assign.Length);
+
+                    Array.Fill(_work, 0);
+                    Array.Fill(_mwUsed, 0);
+                    _assignedFilled = 0;
+                    for (int d = 0; d < _days.Count; d++)
+                    {
+                        int a = _assign[d];
+                        if (a >= 0)
+                        {
+                            _work[a]++;
+                            if (_pref[d, a] == PREF_MW) _mwUsed[a]++;
+                            _assignedFilled++;
                         }
                     }
-                    if (cnt == 0) cnt = int.MaxValue / 2;
-
-                    bool better = (cnt < bestCnt)
-                               || (cnt == bestCnt && bcCnt < bestBC)
-                               || (cnt == bestCnt && bcCnt == bestBC && chCnt < bestCh)
-                               || (cnt == bestCnt && bcCnt == bestBC && chCnt == bestCh && d < bestIndex);
-
-                    if (better) { best = d; bestCnt = cnt; bestBC = bcCnt; bestCh = chCnt; bestIndex = d; }
-                }
-                return best >= 0 ? best : 0;
-            }
-
-            while (assigned < _days)
-            {
-                _ct.ThrowIfCancellationRequested();
-
-                // Na rozbiegu nie forsujemy ciągłości – wybór MRV
-                int day = NextByMRVLocal();
-                if (day < 0) break;
-
-                var legal = new List<int>();
-                foreach (var p in _staticCands[day]) if (IsValidLocal(day, p)) legal.Add(p);
-
-                if (legal.Count > 0)
-                {
-                    legal.Sort((a, b) =>
-                    {
-                        int ra = PrefRank((TypDostepnosci)_av[day, a]);
-                        int rb = PrefRank((TypDostepnosci)_av[day, b]);
-                        if (ra != rb) return rb.CompareTo(ra);
-
-                        int fca = FutureChceFeasibleCount(day, a, CH_RESERVE_HORIZON_DAYS);
-                        int fcb = FutureChceFeasibleCount(day, b, CH_RESERVE_HORIZON_DAYS);
-                        if (fca != fcb) return fca.CompareTo(fcb);
-
-                        int wa = work[a], wb = work[b];
-                        if (wa != wb) return wa.CompareTo(wb);
-                        return a.CompareTo(b);
-                    });
-
-                    int p = legal[0];
-                    assign[day] = p; assigned++; obs++;
-                    if ((TypDostepnosci)_av[day, p] == TypDostepnosci.MogeWarunkowo) mw[p]++;
-                    work[p]++;
+                    _isPrefixActive = false;
+                    appliedBack = back;
+                    SolverDiagnostics.Log($"[LocalRepair] Zastosowano (prefiks {bestPrefixLen} → {bestLocalPrefix}, back={back}).");
+                    break;
                 }
                 else
                 {
-                    assign[day] = -1; assigned++;
+                    Array.Copy(snapAssign, _assign, _assign.Length);
+                    Array.Copy(snapWork, _work, _work.Length);
+                    Array.Copy(snapMw, _mwUsed, _mwUsed.Length);
+                    _assignedFilled = snapFilled;
+                    _isPrefixActive = snapPrefix;
+                    _prefixFirstHole = snapPrefixHole;
                 }
             }
 
-            var r = new RozwiazanyGrafik();
-            for (int d = 0; d < _days; d++)
+            SolverDiagnostics.Log(appliedBack > 0
+                ? $"[LocalRepair] Zakończono – użyto back={appliedBack}"
+                : "[LocalRepair] Brak poprawy prefiksu.");
+        }
+
+        private int GetLocalRepairBudgetMs()
+        {
+            int baseMs = 700 + (_days.Count * _docs.Count) / 7;
+            if (baseMs < 450) baseMs = 450;
+            if (baseMs > 1400) baseMs = 1400;
+            return baseMs;
+        }
+
+        // ====== Lista kandydatów i porządkowanie (ogólne) ======
+        private List<int> OrderCandidates(int day)
+        {
+            var legal = new List<int>(_docs.Count);
+            for (int p = 0; p < _docs.Count; p++)
+                if (IsHardFeasible(day, p)) legal.Add(p);
+
+            if (legal.Count == 0) return legal;
+
+            legal.Sort((a, b) => CompareCandidates(day, a, b));
+            LogCandidates(day, legal);
+            return legal;
+        }
+
+        private int CompareCandidates(int day, int a, int b)
+        {
+            byte avA = _pref[day, a];
+            byte avB = _pref[day, b];
+
+            // Rezerwacja ma bezwzględne pierwszeństwo
+            int rzA = avA == PREF_RZ ? 1 : 0;
+            int rzB = avB == PREF_RZ ? 1 : 0;
+            if (rzA != rzB) return rzB.CompareTo(rzA);
+
+            // Priorytety użytkownika (miękkie)
+            foreach (var pr in _priorities)
             {
-                var date = _in.DniWMiesiacu[d];
-                r.Przypisania[date] = (assign[d] >= 0 ? _docsMap[assign[d]] : null);
+                int cmp = 0;
+                switch (pr)
+                {
+                    case SolverPriority.CiagloscPoczatkowa:
+                        {
+                            // drobny lookahead: preferuj kandydata, który nie zabija dnia+1
+                            bool keepA = KeepsNextFeasible(day, a);
+                            bool keepB = KeepsNextFeasible(day, b);
+                            cmp = keepB.CompareTo(keepA);
+                            if (cmp != 0) return cmp;
+                            break;
+                        }
+                    case SolverPriority.LacznaLiczbaObsadzonychDni:
+                        break;
+                    case SolverPriority.SprawiedliwoscObciazenia:
+                        {
+                            double ra = RatioAfter(a);
+                            double rb = RatioAfter(b);
+                            cmp = ra.CompareTo(rb);
+                            if (cmp != 0) return cmp;
+                            break;
+                        }
+                    case SolverPriority.RownomiernoscRozlozenia:
+                        {
+                            int da = NearestAssignedDistance(day, a);
+                            int db = NearestAssignedDistance(day, b);
+                            cmp = db.CompareTo(da);
+                            if (cmp != 0) return cmp;
+                            break;
+                        }
+                }
             }
-            var vec = EvaluationAndScoringService.ToIntVector(r, _prio);
-            SolverDiagnostics.Log($"Greedy incumbent: wektor= [{string.Join(", ", vec)}], obs={obs}/{_days}");
-            return (assign, vec);
+
+            // Tie-break: CH/BC > MG > MW
+            int pa = PrefRank(avA), pb = PrefRank(avB);
+            if (pa != pb) return pb.CompareTo(pa);
+
+            // Potem mniej przydziałów, większy zapas limitu
+            int wCmp = _work[a].CompareTo(_work[b]);
+            if (wCmp != 0) return wCmp;
+
+            int remA = _limitsByDoc[a] - _work[a];
+            int remB = _limitsByDoc[b] - _work[b];
+            int remCmp = remB.CompareTo(remA);
+            if (remCmp != 0) return remCmp;
+
+            return a.CompareTo(b);
+        }
+
+        private double RatioAfter(int doc)
+        {
+            double lim = Math.Max(1, _limitsByDoc[doc]);
+            return (_work[doc] + 1) / lim;
+        }
+
+        private int NearestAssignedDistance(int day, int doc)
+        {
+            int best = int.MaxValue;
+            for (int d = day - 1; d >= 0; d--)
+                if (_assign[d] == doc) { best = Math.Min(best, day - d); break; }
+
+            for (int d = day + 1; d < _days.Count; d++)
+                if (_assign[d] == doc) { best = Math.Min(best, d - day); break; }
+
+            return best == int.MaxValue ? 9999 : best;
+        }
+
+        private int NearestAssignedDistanceGlobal(int day, int doc) => NearestAssignedDistance(day, doc);
+
+        // ====== Twarde zasady (globalnie) ======
+        private bool IsHardFeasible(int day, int doc)
+        {
+            if (_work[doc] >= _limitsByDoc[doc]) return false;
+
+            byte av = _pref[day, doc];
+
+            if (av == PREF_NONE || av == PREF_OD) return false; // OD = „Dyżur inny” w samym dniu – nie stawiamy
+
+            bool isBC = av == PREF_BC;
+
+            // dzień-po-dniu: BC może łamać
+            if (!isBC)
+            {
+                if (day > 0 && _assign[day - 1] == doc) return false;
+                if (day + 1 < _days.Count && _assign[day + 1] == doc) return false;
+            }
+
+            // sąsiedztwo „Inny dyżur” ±1: **BC może łamać**, MG/CH/MW nie
+            if (!isBC)
+            {
+                if (day > 0 && _pref[day - 1, doc] == PREF_OD) return false;
+                if (day + 1 < _days.Count && _pref[day + 1, doc] == PREF_OD) return false;
+            }
+
+            if (av == PREF_MW && _mwUsed[doc] >= 1) return false;
+
+            return true;
+        }
+
+        private bool IsHardFeasibleWithHypo(int dayToCheck, int cand, int hypoDay, int hypoDoc, byte hypoCode)
+        {
+            if (_work[cand] >= _limitsByDoc[cand]) return false;
+
+            byte av = _pref[dayToCheck, cand];
+            if (av == PREF_NONE || av == PREF_OD) return false;
+
+            bool isBC = av == PREF_BC;
+
+            // dzień-po-dniu: BC może łamać
+            if (!isBC && cand == hypoDoc && Math.Abs(dayToCheck - hypoDay) == 1)
+                return false;
+
+            // sąsiedztwo „Inny dyżur” ±1: **BC może łamać**
+            if (!isBC)
+            {
+                if (dayToCheck > 0 && _pref[dayToCheck - 1, cand] == PREF_OD) return false;
+                if (dayToCheck + 1 < _days.Count && _pref[dayToCheck + 1, cand] == PREF_OD) return false;
+            }
+
+            int mw = _mwUsed[cand];
+            if (cand == hypoDoc && hypoCode == PREF_MW) mw++;
+            if (av == PREF_MW && mw >= 1) return false;
+
+            return true;
+        }
+
+        private bool KeepsNextFeasible(int day, int doc)
+        {
+            int dNext = day + 1;
+            if (dNext >= _days.Count) return true;
+            if (_assign[dNext] != UNASSIGNED) return true;
+
+            byte av0 = _pref[day, doc];
+            for (int q = 0; q < _docs.Count; q++)
+            {
+                if (!IsHardFeasibleWithHypo(dNext, q, day, doc, av0)) continue;
+                return true;
+            }
+            return false;
+        }
+
+        private static int PrefRank(byte code) => code switch
+        {
+            PREF_RZ => 5,
+            PREF_BC => 4,
+            PREF_CH => 3,
+            PREF_MG => 2,
+            PREF_MW => 1,
+            _ => 0
+        };
+
+        private string PrefToString(byte code) => code switch
+        {
+            PREF_BC => "BC",
+            PREF_CH => "CH",
+            PREF_MG => "MG",
+            PREF_MW => "MW",
+            PREF_RZ => "RZ",
+            PREF_OD => "OD",
+            _ => "--"
+        };
+
+        // ====== Ochrona CH/BC – U(c) vs R(c) i kara rankingowa ======
+        private int UniqueCHBCForDocInWindow(int doc, int wStart, int wEnd, int day0, int doc0, byte code0)
+        {
+            if (wStart > wEnd) return 0;
+            int U = 0;
+
+            for (int d = wStart; d <= wEnd; d++)
+            {
+                if (_assign[d] != UNASSIGNED) continue;
+
+                // czy dzień w ogóle ma CH/BC dla kogoś?
+                bool hasChBc = false;
+                for (int q = 0; q < _docs.Count; q++)
+                {
+                    var pv = _pref[d, q];
+                    if (pv == PREF_CH || pv == PREF_BC) { hasChBc = true; break; }
+                }
+                if (!hasChBc) continue;
+
+                // policz ilu kandydatów CH/BC będzie wykonalnych po wzięciu (day0,doc0)
+                int feasibleCh = 0;
+                int who = -1;
+                for (int q = 0; q < _docs.Count; q++)
+                {
+                    var pv = _pref[d, q];
+                    if (pv != PREF_CH && pv != PREF_BC) continue;
+                    if (IsHardFeasibleWithHypo(d, q, day0, doc0, code0))
+                    {
+                        feasibleCh++;
+                        who = q;
+                        if (feasibleCh >= 2) break;
+                    }
+                }
+
+                if (feasibleCh == 1 && who == doc) U++;
+            }
+            return U;
+        }
+
+        private int RealSlotsForDocInWindow(int doc, int wStart, int wEnd, int day0, int doc0, byte code0)
+        {
+            if (wStart > wEnd) return 0;
+            int R = 0;
+
+            for (int d = wStart; d <= wEnd; d++)
+            {
+                if (_assign[d] != UNASSIGNED) continue;
+
+                if (IsHardFeasibleWithHypo(d, doc, day0, doc0, code0))
+                    R++;
+            }
+            return R;
+        }
+
+        private int FutureCHPenalty(int day, int doc, int k)
+        {
+            int end = Math.Min(_days.Count - 1, day + k);
+            byte code0 = _pref[day, doc];
+            int U = UniqueCHBCForDocInWindow(doc, day + 1, end, day, doc, code0);
+            int R = RealSlotsForDocInWindow(doc, day + 1, end, day, doc, code0);
+
+            // Kara: im bardziej R<=U, tym większa kara (mniejsza preferencja)
+            if (R > U) return 0;
+            return (U - R + 1) * 100; // duża kara, by spaść w kolejce
+        }
+
+        // ====== Operacje na stanie ======
+        private void Place(int day, int doc, out byte codeToday)
+        {
+            codeToday = _pref[day, doc];
+            _assign[day] = doc;
+            _work[doc]++;
+            if (codeToday == PREF_MW) _mwUsed[doc]++;
+            _assignedFilled++;
+        }
+
+        private void Unplace(int day, int doc, byte codeToday)
+        {
+            _assign[day] = UNASSIGNED;
+            _work[doc]--;
+            if (codeToday == PREF_MW) _mwUsed[doc]--;
+            _assignedFilled--;
+        }
+
+        private void PlaceEmpty(int day) { _assign[day] = EMPTY; }
+        private void UnplaceEmpty(int day) { _assign[day] = UNASSIGNED; }
+
+        private int UnitPropagateReservations(int fromDay)
+        {
+            int steps = 0;
+            int d = fromDay + 1;
+            while (steps < UNIT_PROP_LIMIT && d < _days.Count)
+            {
+                if (_assign[d] != UNASSIGNED) { d++; continue; }
+
+                int onlyDoc = -2;
+                for (int p = 0; p < _docs.Count; p++)
+                {
+                    byte av = _pref[d, p];
+                    if (av != PREF_RZ) continue;
+                    if (!IsHardFeasible(d, p)) continue;
+
+                    if (onlyDoc == -2) onlyDoc = p;
+                    else { onlyDoc = -1; break; }
+                }
+
+                if (onlyDoc >= 0)
+                {
+                    Place(d, onlyDoc, out _);
+                    steps++;
+                    d++;
+                }
+                else break;
+            }
+
+            if (steps > 0)
+                SolverDiagnostics.Log($"[BT] Unit-prop (Rezerwacje) – auto-kroki: {steps}");
+
+            return steps;
+        }
+
+        private void UnpropagateReservations(int fromDay, int steps)
+        {
+            for (int i = 1; i <= steps; i++)
+            {
+                int d = fromDay + i;
+                if (d < 0 || d >= _days.Count) break;
+                int doc = _assign[d];
+                if (doc >= 0)
+                {
+                    byte av = _pref[d, doc];
+                    Unplace(d, doc, av);
+                }
+            }
+        }
+
+        // ====== Scoring / incumbent ======
+        private void ConsiderAsBest()
+        {
+            var sol = SnapshotToSolution();
+            var score = EvaluateSolution(sol);
+
+            if (_best is null || LexGreater(score, _bestScore!))
+            {
+                _best = sol;
+                _bestScore = score;
+                SolverDiagnostics.Log($"[BEST] Nowy najlepszy: vec={FormatScore(score)}");
+            }
+        }
+
+        private RozwiazanyGrafik SnapshotToSolution()
+        {
+            var sol = new RozwiazanyGrafik { Przypisania = new Dictionary<DateTime, Lekarz?>() };
+            for (int d = 0; d < _days.Count; d++)
+                sol.Przypisania[_days[d]] = _assign[d] >= 0 ? _docs[_assign[d]] : null;
+            return sol;
+        }
+
+        private long[] EvaluateSolution(RozwiazanyGrafik sol)
+        {
+            long sObs = 0;
+            long sCont = 0;
+            long sFair;
+            long sEven;
+
+            var perDoc = new int[_docs.Count];
+            for (int d = 0; d < _days.Count; d++)
+            {
+                if (sol.Przypisania.TryGetValue(_days[d], out var l) && l is not null)
+                {
+                    sObs++;
+                    if (_docIdxBySymbol.TryGetValue(l.Symbol, out var idx))
+                        perDoc[idx]++;
+                }
+            }
+
+            for (int d = 0; d < _days.Count; d++)
+            {
+                if (!sol.Przypisania.TryGetValue(_days[d], out var l) || l is null) break;
+                sCont++;
+            }
+
+            long sumLimits = 0;
+            var lims = new long[_docs.Count];
+            for (int i = 0; i < _docs.Count; i++)
+            {
+                long L = Math.Max(0, _limitsByDoc[i]);
+                lims[i] = L;
+                sumLimits += L;
+            }
+            if (sObs <= 0 || sumLimits <= 0)
+            {
+                sFair = 0;
+            }
+            else
+            {
+                // sprawiedliwość = proporcjonalność do limitów (mniejsza suma odchyleń = lepiej)
+                double sumAbs = 0.0;
+                for (int i = 0; i < _docs.Count; i++)
+                {
+                    double expected = sObs * (lims[i] / (double)sumLimits);
+                    sumAbs += Math.Abs(perDoc[i] - expected);
+                }
+                sFair = -(long)Math.Round(sumAbs * 1000.0);
+            }
+
+            // równomierność (prosty karny „zlepek” za bliskie sąsiedztwo)
+            int penalty = 0;
+            int[] perDayDoc = new int[_days.Count];
+            for (int d = 0; d < _days.Count; d++)
+            {
+                if (sol.Przypisania.TryGetValue(_days[d], out var l) && l is not null &&
+                    _docIdxBySymbol.TryGetValue(l.Symbol, out var idx))
+                    perDayDoc[d] = idx;
+                else
+                    perDayDoc[d] = -1;
+            }
+            for (int d = 0; d < _days.Count; d++)
+            {
+                int p = perDayDoc[d];
+                if (p < 0) continue;
+                if (d > 0 && perDayDoc[d - 1] == p) penalty++;
+                if (d + 1 < _days.Count && perDayDoc[d + 1] == p) penalty++;
+            }
+            sEven = -penalty;
+
+            var map = new Dictionary<SolverPriority, long>
+            {
+                { SolverPriority.LacznaLiczbaObsadzonychDni, sObs },
+                { SolverPriority.CiagloscPoczatkowa, sCont },
+                { SolverPriority.SprawiedliwoscObciazenia, sFair },
+                { SolverPriority.RownomiernoscRozlozenia, sEven }
+            };
+
+            var vec = new long[_priorities.Count];
+            for (int i = 0; i < _priorities.Count; i++)
+            {
+                var pr = _priorities[i];
+                vec[i] = map.TryGetValue(pr, out var v) ? v : 0;
+            }
+            return vec;
         }
 
         private static bool LexGreater(long[] a, long[] b)
         {
-            for (int i = 0; i < a.Length; i++) { if (a[i] != b[i]) return a[i] > b[i]; }
-            return false;
+            int n = Math.Min(a.Length, b.Length);
+            for (int i = 0; i < n; i++)
+            {
+                if (a[i] > b[i]) return true;
+                if (a[i] < b[i]) return false;
+            }
+            return a.Length > b.Length;
         }
 
-        private static int PrefRank(TypDostepnosci a) => a switch
+        private string FormatScore(long[] v) => $"[{string.Join(", ", v)}]";
+
+        private void BuildGreedyIncumbent()
         {
-            TypDostepnosci.Rezerwacja => 5,
-            TypDostepnosci.BardzoChce => 4,
-            TypDostepnosci.Chce => 3,
-            TypDostepnosci.Moge => 2,
-            TypDostepnosci.MogeWarunkowo => 1,
-            _ => 0
-        };
-
-        private sealed class Dinic
-        {
-            private sealed class Edge
-            {
-                public int To, Rev;
-                public int Cap;
-                public Edge(int to, int rev, int cap) { To = to; Rev = rev; Cap = cap; }
-            }
-
-            private readonly List<List<Edge>> _g = new();
-            private int[] _level = Array.Empty<int>();
-            private int[] _it = Array.Empty<int>();
-
-            public int AddNode() { _g.Add(new List<Edge>()); return _g.Count - 1; }
-
-            public void AddEdge(int u, int v, int cap)
-            {
-                var e1 = new Edge(v, _g[v].Count, cap);
-                var e2 = new Edge(u, _g[u].Count, 0);
-                _g[u].Add(e1);
-                _g[v].Add(e2);
-            }
-
-            private bool Bfs(int s, int t)
-            {
-                int n = _g.Count;
-                _level = new int[n];
-                Array.Fill(_level, -1);
-                var q = new Queue<int>();
-                _level[s] = 0; q.Enqueue(s);
-                while (q.Count > 0)
-                {
-                    int u = q.Dequeue();
-                    foreach (var e in _g[u])
-                    {
-                        if (e.Cap <= 0 || _level[e.To] >= 0) continue;
-                        _level[e.To] = _level[u] + 1;
-                        q.Enqueue(e.To);
-                    }
-                }
-                return _level[t] >= 0;
-            }
-
-            private int Dfs(int u, int t, int f)
-            {
-                if (u == t) return f;
-                for (; _it[u] < _g[u].Count; _it[u]++)
-                {
-                    var e = _g[u][_it[u]];
-                    if (e.Cap <= 0 || _level[e.To] != _level[u] + 1) continue;
-                    int got = Dfs(e.To, t, Math.Min(f, e.Cap));
-                    if (got <= 0) continue;
-                    e.Cap -= got;
-                    _g[e.To][e.Rev].Cap += got;
-                    return got;
-                }
-                return 0;
-            }
-
-            public int MaxFlow(int s, int t, int limit = int.MaxValue)
-            {
-                int flow = 0;
-                while (flow < limit && Bfs(s, t))
-                {
-                    _it = new int[_g.Count];
-                    int f;
-                    while (flow < limit && (f = Dfs(s, t, limit - flow)) > 0) flow += f;
-                }
-                return flow;
-            }
-        }
-
-        // ===== LOGOWANIE (wejście, kandydaci, itp.) =====
-
-        private void LogHeaderInput()
-        {
-            if (!SolverDiagnostics.Enabled) return;
+            var snapshotAssign = (int[])_assign.Clone();
+            var snapshotWork = (int[])_work.Clone();
+            var snapshotMw = (int[])_mwUsed.Clone();
+            int snapshotFilled = _assignedFilled;
+            bool snapshotPrefix = _isPrefixActive;
 
             try
             {
-                SolverDiagnostics.Log("=== Start BacktrackingSolver ===");
-                SolverDiagnostics.Log($"Dni w miesiącu: {_days}, lekarze: {_docs}");
-                SolverDiagnostics.Log($"Priorytety: {SolverDiagnostics.JoinInline(_prio.Select(p => p.ToString()))}");
-
-                var limLines = new List<string>();
-                for (int p = 0; p < _docs; p++)
-                    limLines.Add($"{_docsMap[p].Symbol}: limit={_limit[p]}");
-                SolverDiagnostics.LogBlock("Limity lekarzy", limLines);
-
-                SolverDiagnostics.Log("Legenda deklaracji: BC=BardzoChce, CH=Chce, MG=Moge, MW=MogeWarunkowo, RZ=Rezerwacja, --=brak/wykluczone");
-
-                var lines = new List<string>(_days);
-                for (int d = 0; d < _days; d++)
+                for (int day = 0; day < _days.Count; day++)
                 {
-                    var date = _in.DniWMiesiacu[d];
-                    var parts = new List<string>(_docs);
-                    for (int p = 0; p < _docs; p++)
+                    if (_token.IsCancellationRequested) break;
+                    if (_assign[day] != UNASSIGNED) continue;
+
+                    var cand = OrderCandidates(day);
+                    if (cand.Count == 0)
                     {
-                        var code = Code((TypDostepnosci)_av[d, p]);
-                        parts.Add($"{_docsMap[p].Symbol}:{code}");
+                        PlaceEmpty(day);
+                        if (_isPrefixActive && day == PrefixLength())
+                        {
+                            _isPrefixActive = false;
+                            _prefixFirstHole = day;
+                        }
+                        continue;
                     }
-                    lines.Add($"{date:yyyy-MM-dd} | {string.Join(", ", parts)}");
-                }
-                SolverDiagnostics.LogBlock("Deklaracje (dzień → lekarz:deklaracja)", lines);
-            }
-            catch { }
 
-            static string Code(TypDostepnosci t) => t switch
-            {
-                TypDostepnosci.BardzoChce => "BC",
-                TypDostepnosci.Chce => "CH",
-                TypDostepnosci.Moge => "MG",
-                TypDostepnosci.MogeWarunkowo => "MW",
-                TypDostepnosci.Rezerwacja => "RZ",
-                TypDostepnosci.Urlop => "--",
-                TypDostepnosci.Niedostepny => "--",
-                TypDostepnosci.DyzurInny => "--",
-                _ => "--"
-            };
-        }
-
-        private void LogCandidatesWithReasons(int day, List<int> legal, bool continuityActive)
-        {
-            if (!SolverDiagnostics.Enabled) return;
-
-            try
-            {
-                var date = _in.DniWMiesiacu[day];
-                var all = _staticCands[day];
-
-                var lines = new List<string>();
-                lines.Add($"Dzień {date:yyyy-MM-dd} (prefiks={_prefx}, ciągłość={(continuityActive ? "TAK" : "NIE")}) – kandydaci:");
-
-                foreach (var p in all)
-                {
-                    var pref = (TypDostepnosci)_av[day, p];
-                    if (legal.Contains(p))
-                    {
-                        lines.Add($"  ✓ {FmtDoc(p)} [{FmtPref(pref)}]  (pracuje={_work[p]}, limit={_limit[p]}, MWused={_mwCount[p]})");
-                    }
-                    else
-                    {
-                        var reason = GetRejectionReason(day, p, continuityActive);
-                        lines.Add($"  ✗ {FmtDoc(p)} [{FmtPref(pref)}]  → {reason}");
-                    }
+                    var doc = cand[0];
+                    Place(day, doc, out var code);
+                    if (code == PREF_RZ)
+                        UnitPropagateReservations(day);
                 }
 
-                if (legal.Count == 0) lines.Add("  (brak legalnych kandydatów)");
-
-                SolverDiagnostics.LogBlock($"Kandydaci dnia {date:yyyy-MM-dd}", lines);
+                ConsiderAsBest();
+                int obs = 0; foreach (var kv in _best!.Przypisania) if (kv.Value != null) obs++;
+                SolverDiagnostics.Log($"Greedy incumbent: obs={obs}/{_days.Count}");
             }
-            catch { }
+            finally
+            {
+                Array.Copy(snapshotAssign, _assign, _assign.Length);
+                Array.Copy(snapshotWork, _work, _work.Length);
+                Array.Copy(snapshotMw, _mwUsed, _mwUsed.Length);
+                _assignedFilled = snapshotFilled;
+                _isPrefixActive = snapshotPrefix;
+            }
         }
 
-        private string GetRejectionReason(int day, int p, bool continuityActive)
+        private int CountEmpties()
         {
-            var reasons = new List<string>();
-
-            if (p < 0 || p >= _docs) return "błędny indeks lekarza";
-            if (_work[p] >= _limit[p]) reasons.Add("limit wyczerpany");
-
-            var av = (TypDostepnosci)_av[day, p];
-            bool bc = av == TypDostepnosci.BardzoChce;
-
-            if (av == TypDostepnosci.Niedostepny || av == TypDostepnosci.Urlop || av == TypDostepnosci.DyzurInny)
-                reasons.Add("deklaracja wyklucza dzień");
-
-            if (!bc)
-            {
-                if (day > 0 && _assign[day - 1] == p) reasons.Add("dzień-1 ten sam lekarz");
-                if (day + 1 < _days && _assign[day + 1] == p) reasons.Add("dzień+1 ten sam lekarz");
-                if (_nextToOther[day, p]) reasons.Add("sąsiedztwo „Dyżur (inny)”");
-            }
-
-            if (av == TypDostepnosci.MogeWarunkowo && _mwCount[p] >= 1) reasons.Add("limit MW=1 już wykorzystany");
-
-            if (av == TypDostepnosci.Moge || av == TypDostepnosci.MogeWarunkowo)
-            {
-                if (UniqueFutureFeasibleExists(day, p)) reasons.Add("jest przyszły dzień, gdzie tylko ten lekarz jest realny");
-                int needChce = FutureChceFeasibleCount(day, p, CH_RESERVE_HORIZON_DAYS);
-                int remainingAfter = _limit[p] - _work[p] - 1;
-                if (needChce > 0 && remainingAfter < needChce) reasons.Add($"braknie limitu na przyszłe CH (horyzont {CH_RESERVE_HORIZON_DAYS} dni, potrzebne={needChce})");
-            }
-
-            if (reasons.Count == 0) reasons.Add("odpadł w innej weryfikacji");
-
-            return string.Join("; ", reasons);
+            int c = 0;
+            for (int d = 0; d < _days.Count; d++)
+                if (_assign[d] == EMPTY) c++;
+            return c;
         }
 
-        private string FmtDay(int d) => d >= 0 && d < _days ? _in.DniWMiesiacu[d].ToString("yyyy-MM-dd") : $"d={d}";
-        private string FmtDoc(int p) => $"{_docsMap[p].Symbol}";
-        private string FmtPref(TypDostepnosci t) => t switch
+        private int PrefixLength()
         {
-            TypDostepnosci.BardzoChce => "BC",
-            TypDostepnosci.Chce => "CH",
-            TypDostepnosci.Moge => "MG",
-            TypDostepnosci.MogeWarunkowo => "MW",
-            TypDostepnosci.Rezerwacja => "RZ",
-            _ => "--"
-        };
+            int len = 0;
+            for (; len < _days.Count; len++)
+            {
+                if (_assign[len] == UNASSIGNED) break;
+                if (_assign[len] == EMPTY) break;
+            }
+            return len;
+        }
+
+        private string FormatDay(int d) => $"{_days[d]:yyyy-MM-dd}";
+
+        // ====== Logging ======
+        private void LogLimits()
+        {
+            SolverDiagnostics.Log("--- Limity lekarzy ---");
+            for (int i = 0; i < _docs.Count; i++)
+                SolverDiagnostics.Log($"{_docs[i].Symbol}: limit={_limitsByDoc[i]}");
+            SolverDiagnostics.Log("--- /Limity lekarzy ---");
+        }
+
+        private void LogLegendAndAvailability()
+        {
+            SolverDiagnostics.Log("Legenda: BC=BardzoChce, CH=Chce, MG=Moge, MW=MogeWarunkowo, RZ=Rezerwacja, OD=Dyżur(inny), --=brak");
+            SolverDiagnostics.Log("--- Deklaracje (dzień → lekarz:deklaracja) ---");
+            for (int d = 0; d < _days.Count; d++)
+            {
+                var date = _days[d];
+                var parts = new List<string>(_docs.Count);
+                for (int i = 0; i < _docs.Count; i++)
+                    parts.Add($"{_docs[i].Symbol}:{PrefToString(_pref[d, i])}");
+                SolverDiagnostics.Log($"{date:yyyy-MM-dd} | {string.Join(", ", parts)}");
+            }
+            SolverDiagnostics.Log("--- /Deklaracje (dzień → lekarz:deklaracja) ---");
+        }
+
+        private void LogCandidates(int day, List<int> cand)
+        {
+            SolverDiagnostics.Log($"--- Kandydaci dnia {FormatDay(day)} ---");
+            SolverDiagnostics.Log($"Dzień {FormatDay(day)} (prefiks={(_isPrefixActive && day == PrefixLength() ? PrefixLength().ToString() : "—")}) – kandydaci:");
+            foreach (var p in cand)
+                SolverDiagnostics.Log($"  ✓ {_docs[p].Symbol} [{PrefToString(_pref[day, p])}]  (pracuje={_work[p]}, limit={_limitsByDoc[p]})");
+            SolverDiagnostics.Log($"--- /Kandydaci dnia {FormatDay(day)} ---");
+        }
     }
 }

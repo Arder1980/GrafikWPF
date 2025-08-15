@@ -12,20 +12,21 @@ namespace GrafikWPF
     /// F1: maksymalizacja prefiksu (ciągłość od początku).
     /// F2: dogęszczanie reszty.
     ///
-    /// Wydajnościowe elementy:
+    /// Przyspieszenia:
     ///  - mikrosito d+1 (forward-check),
-    ///  - buckety kandydatów + tani tie-break,
+    ///  - buckety kandydatów,
     ///  - okienkowy i pełny UB (flow) z lokalnym cache,
     ///  - throttling logów,
     ///  - oszczędne F2 (buforowana lista).
     ///
     /// Integracja:
     ///  - twarde reguły: SchedulingRules.IsHardFeasible(...),
+    ///  - porządek kandydatów: SchedulingRules.OrderCandidates(...),
     ///  - wektor jakości: SchedulingRules.EvaluateSolution(...).
     /// </summary>
     public sealed class BacktrackingSolver : IGrafikSolver
     {
-        // Kody preferencji (z mapowania TypDostepnosci)
+        // Kody preferencji (mapowane z TypDostepnosci)
         private const byte PREF_NONE = 0;
         private const byte PREF_MW = 1; // Mogę warunkowo (max 1/mies.)
         private const byte PREF_MG = 2; // Mogę
@@ -69,8 +70,8 @@ namespace GrafikWPF
         private const int F1_WIN_SIZE = 10;
         private const int F1_WIN_UB_EVERY = 1;
 
-        private readonly Dictionary<(int day, ulong capHash), int> _ubCache = new(1024);
-        private readonly Dictionary<(int start, int end, ulong capHash), int> _winUbCache = new(2048);
+        private readonly Dictionary<(int day, ulong capHash), int> _ubCache = new Dictionary<(int, ulong), int>(1024);
+        private readonly Dictionary<(int start, int end, ulong capHash), int> _winUbCache = new Dictionary<(int, int, ulong), int>(2048);
 
         // Buckety kandydatów
         private List<int>[] _buckBC = Array.Empty<List<int>>();
@@ -84,11 +85,11 @@ namespace GrafikWPF
         private const int LOG_EVERY_WINUB = 10;  // 0 = loguj każdy
 
         // Bufor F2 (mniej alokacji)
-        private readonly List<int> _tmp = new(64);
+        private readonly List<int> _tmp = new List<int>(64);
 
-        // Polityki
-        private readonly bool _bcBreaksAdjacent = true; // BC może łamać sąsiedztwo
-        private readonly int _mwMax = 1;    // Jedno MW na osobę
+        // (historyczne flagi – nieużywane bezpośrednio po integracji reguł)
+        private readonly bool _bcBreaksAdjacent = true;
+        private readonly int _mwMax = 1;
 
         public BacktrackingSolver(GrafikWejsciowy input,
                                   IReadOnlyList<SolverPriority> priorities,
@@ -171,18 +172,24 @@ namespace GrafikWPF
                 for (int j = 0; j < _docs.Count; j++)
                 {
                     var sym = _docs[j].Symbol;
-                    var td = (_av.TryGetValue(date, out var map) && map.TryGetValue(sym, out var t))
-                        ? t : TypDostepnosci.Niedostepny;
-                    _pref[d, j] = td switch
+                    TypDostepnosci td = TypDostepnosci.Niedostepny;
+                    Dictionary<string, TypDostepnosci> map;
+                    if (_av.TryGetValue(date, out map) && map.TryGetValue(sym, out td))
                     {
-                        TypDostepnosci.MogeWarunkowo => PREF_MW,
-                        TypDostepnosci.Moge => PREF_MG,
-                        TypDostepnosci.Chce => PREF_CH,
-                        TypDostepnosci.BardzoChce => PREF_BC,
-                        TypDostepnosci.Rezerwacja => PREF_RZ,
-                        TypDostepnosci.DyzurInny => PREF_OD,
-                        _ => PREF_NONE
-                    };
+                        // ok
+                    }
+                    byte code;
+                    switch (td)
+                    {
+                        case TypDostepnosci.MogeWarunkowo: code = PREF_MW; break;
+                        case TypDostepnosci.Moge: code = PREF_MG; break;
+                        case TypDostepnosci.Chce: code = PREF_CH; break;
+                        case TypDostepnosci.BardzoChce: code = PREF_BC; break;
+                        case TypDostepnosci.Rezerwacja: code = PREF_RZ; break;
+                        case TypDostepnosci.DyzurInny: code = PREF_OD; break;
+                        default: code = PREF_NONE; break;
+                    }
+                    _pref[d, j] = code;
                 }
             }
         }
@@ -201,7 +208,7 @@ namespace GrafikWPF
             void DFS(int day)
             {
                 _token.ThrowIfCancellationRequested();
-                _progress?.Report(day / (double)_days.Count);
+                if (_progress != null) _progress.Report(day / (double)_days.Count);
 
                 if (day > _bestPrefixLen)
                 {
@@ -271,121 +278,65 @@ namespace GrafikWPF
             DFS(0);
         }
 
-        // --- F1: pomocnicze ---
+        // --- F1: porządkowanie kandydatów (SchedulingRules + buckety) ---
         private List<int> F1_OrderCandidates(int day, int[] curAssign, int[] curWork, int[] curMW)
         {
-            // Rezerwacje (często brak w F1, bo wrapper je wyciął)
-            var RZ = new List<int>();
-            for (int p = 0; p < _docs.Count; p++)
-            {
-                if (_pref[day, p] == PREF_RZ && F1_IsFeasible(day, p, curAssign, curWork, curMW))
-                    RZ.Add(p);
-            }
-            if (RZ.Count > 0)
-            {
-                RZ.Sort((a, b) => TieBreakF1(day, a, b, curAssign, curWork));
-                SolverDiagnostics.Log($"[F1] RZ wymuszone – kandydaci: {string.Join(", ", RZ.Select(i => _docs[i].Symbol))}");
-                return RZ;
-            }
+            // Kontekst na bazie LOKALNEGO stanu F1
+            var ctx = BuildCtx(true, curAssign, curWork, curMW);
 
-            // Buckety BC→CH→MG→MW (szybka wstępna selekcja)
-            var baseList = new List<int>(
-                (_buckBC[day]?.Count ?? 0) +
-                (_buckCH[day]?.Count ?? 0) +
-                (_buckMG[day]?.Count ?? 0) +
-                (_buckMW[day]?.Count ?? 0)
-            );
-            if (_buckBC[day] != null) baseList.AddRange(_buckBC[day]);
-            if (_buckCH[day] != null) baseList.AddRange(_buckCH[day]);
-            if (_buckMG[day] != null) baseList.AddRange(_buckMG[day]);
-            if (_buckMW[day] != null) baseList.AddRange(_buckMW[day]);
+            // 1) Globalny, deterministyczny porządek wg wspólnych reguł
+            var orderedAll = SchedulingRules.OrderCandidates(day, ctx);
 
-            // Limit
-            for (int i = baseList.Count - 1; i >= 0; i--)
+            // 2) Rezerwacje – jeżeli jakieś są i wykonalne, bierzemy tylko je
+            var rz = new List<int>();
+            for (int i = 0; i < orderedAll.Count; i++)
             {
-                int p = baseList[i];
-                if (curWork[p] >= _limitsByDoc[p]) baseList.RemoveAt(i);
+                int p = orderedAll[i];
+                if (_pref[day, p] == PREF_RZ && SchedulingRules.IsHardFeasible(day, p, ctx))
+                    rz.Add(p);
+            }
+            if (rz.Count > 0)
+            {
+                SolverDiagnostics.Log($"[F1] RZ wymuszone – kandydaci: {string.Join(", ", rz.Select(i => _docs[i].Symbol))}");
+                return rz;
             }
 
-            // Twarda wykonalność
-            var cands = new List<int>(baseList.Count);
-            foreach (var doc in baseList)
+            // 3) Szybkie sito bucketowe (BC→CH→MG→MW) + limity + twarda wykonalność
+            var allowed = new HashSet<int>();
+            Action<List<int>, byte> addFromBucket = (bucket, code) =>
             {
-                if (F1_IsFeasible(day, doc, curAssign, curWork, curMW))
-                    cands.Add(doc);
-            }
-
-            if (cands.Count <= 1) return cands;
-
-            var nearestCache = new Dictionary<int, int>(cands.Count);
-            int NearestCached(int doc)
-            {
-                if (!nearestCache.TryGetValue(doc, out var v))
+                if (bucket == null) return;
+                for (int k = 0; k < bucket.Count; k++)
                 {
-                    v = NearestAssignedDistance(day, doc, curAssign);
-                    nearestCache[doc] = v;
+                    int p = bucket[k];
+                    if (_pref[day, p] != code) continue;
+                    if (curWork[p] >= _limitsByDoc[p]) continue;
+                    if (!SchedulingRules.IsHardFeasible(day, p, ctx)) continue;
+                    allowed.Add(p);
                 }
-                return v;
-            }
+            };
+            addFromBucket(_buckBC[day], PREF_BC);
+            addFromBucket(_buckCH[day], PREF_CH);
+            addFromBucket(_buckMG[day], PREF_MG);
+            addFromBucket(_buckMW[day], PREF_MW);
 
-            cands.Sort((a, b) =>
+            if (allowed.Count == 0) return new List<int>();
+
+            // 4) KOLEJNOŚĆ: tylko ci, którzy przeszli nasze sito, ale
+            //    w kolejności ustalonej przez SchedulingRules.OrderCandidates(...)
+            var result = new List<int>(allowed.Count);
+            for (int i = 0; i < orderedAll.Count; i++)
             {
-                int wa = PrefWeight(_pref[day, a]);
-                int wb = PrefWeight(_pref[day, b]);
-                if (wa != wb) return wa - wb;
-
-                int la = _limitsByDoc[a];
-                int lb = _limitsByDoc[b];
-                int wna = curWork[a] + 1;
-                int wnb = curWork[b] + 1;
-                long left = (long)wna * lb;
-                long right = (long)wnb * la;
-                if (left != right) return left < right ? -1 : 1;
-
-                int da = NearestCached(a);
-                int db = NearestCached(b);
-                if (da != db) return db - da;
-
-                // stabilizator deterministyczny
-                return a - b;
-            });
-
-            return cands;
-        }
-
-        private static int PrefWeight(byte code)
-        {
-            switch (code)
-            {
-                case PREF_BC: return 0;
-                case PREF_CH: return 1;
-                case PREF_MG: return 2;
-                case PREF_MW: return 3;
-                default: return 4;
+                int p = orderedAll[i];
+                if (allowed.Contains(p)) result.Add(p);
             }
-        }
-
-        private int TieBreakF1(int day, int a, int b, int[] curAssign, int[] curWork)
-        {
-            int la = _limitsByDoc[a], lb = _limitsByDoc[b];
-            int wna = curWork[a] + 1, wnb = curWork[b] + 1;
-            long left = (long)wna * lb;
-            long right = (long)wnb * la;
-            int cmp = left.CompareTo(right);
-            if (cmp != 0) return cmp;
-
-            int da = NearestAssignedDistance(day, a, curAssign);
-            int db = NearestAssignedDistance(day, b, curAssign);
-            cmp = db.CompareTo(da);
-            if (cmp != 0) return cmp;
-
-            return a.CompareTo(b);
+            return result;
         }
 
         private bool F1_IsFeasible(int day, int doc, int[] curAssign, int[] curWork, int[] curMW)
         {
-            // Delegacja do wspólnych reguł – ale w kontekście lokalnych tablic stanu
-            var ctx = BuildCtx(isPrefixActive: true, assign: curAssign, work: curWork, mw: curMW);
+            // Twarde reguły – w kontekście lokalnych tablic stanu
+            var ctx = BuildCtx(true, curAssign, curWork, curMW);
             return SchedulingRules.IsHardFeasible(day, doc, ctx);
         }
 
@@ -504,47 +455,26 @@ namespace GrafikWPF
             return any;
         }
 
+        // F2: wybór kandydata w obrębie bieżącego bucketu według wspólnego porządku
         private int SelectByTieBreakF2(int day, List<int> candidates)
         {
-            // Pozostawiamy Twoją deterministykę F2 (sprawiedliwość/rozłożenie),
-            // bo EvaluateSolution i tak spina scoring. Stabilizator = indeks.
-            candidates.Sort((a, b) =>
+            var ctx = BuildCtx(false);
+            var orderedAll = SchedulingRules.OrderCandidates(day, ctx);
+            var set = new HashSet<int>(candidates);
+            for (int i = 0; i < orderedAll.Count; i++)
             {
-                foreach (var pr in _priorities.Skip(1)) // #2..#4 (bez "ciągłości od początku", bo prefiks już ustalony)
-                {
-                    int cmp = 0;
-                    switch (pr)
-                    {
-                        case SolverPriority.SprawiedliwoscObciazenia:
-                            {
-                                double ra = RatioAfter(_workPerDoc[a], _limitsByDoc[a]);
-                                double rb = RatioAfter(_workPerDoc[b], _limitsByDoc[b]);
-                                cmp = ra.CompareTo(rb);
-                                if (cmp != 0) return cmp;
-                                break;
-                            }
-                        case SolverPriority.RownomiernoscRozlozenia:
-                            {
-                                int da = NearestAssignedDistanceGlobal(day, a);
-                                int db = NearestAssignedDistanceGlobal(day, b);
-                                cmp = db.CompareTo(da);
-                                if (cmp != 0) return cmp;
-                                break;
-                            }
-                        case SolverPriority.CiagloscPoczatkowa:
-                        case SolverPriority.LacznaLiczbaObsadzonychDni:
-                            break;
-                    }
-                }
-                return a.CompareTo(b);
-            });
-            return candidates[0];
+                int p = orderedAll[i];
+                if (set.Contains(p)) return p;
+            }
+            // Awaryjnie – stabilny wybór (nie powinno się zdarzyć)
+            int best = candidates[0];
+            for (int i = 1; i < candidates.Count; i++) if (candidates[i] < best) best = candidates[i];
+            return best;
         }
 
         private bool IsHardFeasibleGlobal(int day, int doc)
         {
-            // Twarde reguły – na bazie GLOBALNYCH pól (_assign/_workPerDoc/_mwUsed)
-            var ctx = BuildCtx(isPrefixActive: false);
+            var ctx = BuildCtx(false);
             return SchedulingRules.IsHardFeasible(day, doc, ctx);
         }
 
@@ -567,17 +497,21 @@ namespace GrafikWPF
         // *** Wspólna ocena jakości ***
         private long[] EvaluateSolution(RozwiazanyGrafik sol)
         {
-            // Kontekst na bazie aktualnych TABLIC stanu (globalnych)
-            var ctx = BuildCtx(isPrefixActive: false);
+            var ctx = BuildCtx(false);
             return SchedulingRules.EvaluateSolution(sol, _priorities, ctx);
         }
 
         // ===================== Utils =====================
-        private SchedulingRules.Context BuildCtx(bool isPrefixActive, int[]? assign = null, int[]? work = null, int[]? mw = null)
+        private SchedulingRules.Context BuildCtx(bool isPrefixActive, int[] assign = null, int[] work = null, int[] mw = null)
         {
-            // Uwaga: limits z _input (po redukcji wrappera), dla spójności z innymi silnikami
-            var limits = _docs.ToDictionary(d => d.Symbol, d =>
-                _input.LimityDyzurow.TryGetValue(d.Symbol, out var lim) ? lim : _days.Count);
+            var limits = new Dictionary<string, int>(_docs.Count);
+            for (int i = 0; i < _docs.Count; i++)
+            {
+                var sym = _docs[i].Symbol;
+                int lim;
+                if (!_input.LimityDyzurow.TryGetValue(sym, out lim)) lim = _days.Count;
+                limits[sym] = lim;
+            }
 
             return new SchedulingRules.Context(
                 days: _days,
@@ -656,13 +590,20 @@ namespace GrafikWPF
             }
         }
 
-        private string FormatDay(int dayIndex) => $"{_days[dayIndex]:yyyy-MM-dd}";
+        private string FormatDay(int dayIndex)
+        {
+            return _days[dayIndex].ToString("yyyy-MM-dd");
+        }
 
-        private static string FormatScore(long[] v) => $"[{string.Join(", ", v)}]";
+        private static string FormatScore(long[] v)
+        {
+            return "[" + string.Join(", ", v) + "]";
+        }
 
         private bool Better(long[] cur, long[] best)
         {
-            for (int i = 0; i < Math.Min(cur.Length, best.Length); i++)
+            int n = Math.Min(cur.Length, best.Length);
+            for (int i = 0; i < n; i++)
             {
                 if (cur[i] > best[i]) return true;
                 if (cur[i] < best[i]) return false;
@@ -705,7 +646,8 @@ namespace GrafikWPF
         private int F1_SuffixUpperBoundCached(int startDay, int[] curWork)
         {
             var key = (startDay, HashRemCap(curWork));
-            if (_ubCache.TryGetValue(key, out var ub)) return ub;
+            int ub;
+            if (_ubCache.TryGetValue(key, out ub)) return ub;
 
             ub = FlowUB.UBCount(
                 days: _days.Count,
@@ -713,7 +655,7 @@ namespace GrafikWPF
                 avMask: (d, p) =>
                 {
                     if (d < startDay) return AvMask.None;
-                    var code = _pref[d, p];
+                    byte code = _pref[d, p];
                     return (code == PREF_NONE || code == PREF_OD) ? AvMask.None : AvMask.Any;
                 },
                 remCapPerDoc: p => Math.Max(0, _limitsByDoc[p] - curWork[p]),
@@ -727,7 +669,8 @@ namespace GrafikWPF
         {
             if (endDay < startDay) return 0;
             var key = (startDay, endDay, HashRemCap(curWork));
-            if (_winUbCache.TryGetValue(key, out var ub)) return ub;
+            int ub;
+            if (_winUbCache.TryGetValue(key, out ub)) return ub;
 
             ub = FlowUB.UBCount(
                 days: _days.Count,
@@ -735,7 +678,7 @@ namespace GrafikWPF
                 avMask: (d, p) =>
                 {
                     if (d < startDay || d > endDay) return AvMask.None;
-                    var code = _pref[d, p];
+                    byte code = _pref[d, p];
                     return (code == PREF_NONE || code == PREF_OD) ? AvMask.None : AvMask.Any;
                 },
                 remCapPerDoc: p => Math.Max(0, _limitsByDoc[p] - curWork[p]),
@@ -747,7 +690,8 @@ namespace GrafikWPF
 
         private ulong HashRemCap(int[] curWork)
         {
-            ulong h = 1469598103934665603ul; // FNV-1a 64
+            // FNV-1a 64
+            ulong h = 1469598103934665603ul;
             const ulong P = 1099511628211ul;
             for (int p = 0; p < _docs.Count; p++)
             {

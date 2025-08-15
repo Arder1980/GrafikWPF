@@ -7,26 +7,29 @@ using GrafikWPF.Algorithms;
 
 namespace GrafikWPF
 {
+    public enum StrictMode { Off, Half, Full }
+
     /// <summary>
-    /// BacktrackingSolver – deterministyczny, jednordzeniowy.
+    /// BacktrackingSolver – deterministyczny.
     /// F1: maksymalizacja prefiksu (ciągłość od początku).
-    /// F2: dogęszczanie reszty.
+    /// F2: dogęszczanie (heurystycznie) LUB (w trybie STRICT) branch-and-bound z gwarancją jakości.
     ///
-    /// Przyspieszenia:
-    ///  - mikrosito d+1 (forward-check),
-    ///  - buckety kandydatów,
-    ///  - okienkowy i pełny UB (flow) z lokalnym cache,
-    ///  - throttling logów,
-    ///  - oszczędne F2 (buforowana lista).
-    ///
-    /// Integracja:
-    ///  - twarde reguły: SchedulingRules.IsHardFeasible(...),
-    ///  - porządek kandydatów: SchedulingRules.OrderCandidates(...),
-    ///  - wektor jakości: SchedulingRules.EvaluateSolution(...).
+    /// Integracja ze SchedulingRules:
+    ///  - IsHardFeasible(...) – twarde reguły,
+    ///  - OrderCandidates(...) – porządkowanie kandydatów,
+    ///  - EvaluateSolution(...) – wspólny wektor jakości.
     /// </summary>
     public sealed class BacktrackingSolver : IGrafikSolver
     {
-        // Kody preferencji (mapowane z TypDostepnosci)
+        // ======= PRZEŁĄCZNIK TRYBU ŚCISŁOŚCI =======
+        private const StrictMode STRICT_MODE = StrictMode.Full;  // Off | Half | Full
+
+        // Ograniczenia bezpieczeństwa dla STRICT (żeby nie "wyparować" czasu przypadkiem)
+        private const int STRICT_MAX_PREFIXES = 10000;          // max liczba najlepszych prefiksów do rozpatrzenia
+        private const int STRICT_NODE_LIMIT = 500_000;        // twardy limit węzłów B&B (Half/Full)
+        // (Jeśli osiągnięty, solver kończy z najlepszym znalezionym dotąd wynikiem i loguje ostrzeżenie; formalna gwarancja wtedy OFF)
+
+        // ======= Kody preferencji (mapowane z TypDostepnosci) =======
         private const byte PREF_NONE = 0;
         private const byte PREF_MW = 1; // Mogę warunkowo (max 1/mies.)
         private const byte PREF_MG = 2; // Mogę
@@ -64,7 +67,10 @@ namespace GrafikWPF
         private int _bestPrefixLen;
         private int[]? _bestPrefixAssign;
 
-        // UB/okna
+        // STRICT: kolekcja wszystkich najlepszych prefiksów (#1)
+        private List<int[]>? _strictPrefixes;
+
+        // UB/okna dla F1 i B&B
         private const bool F1_USE_FULL_UB = true;
         private const int F1_FULL_UB_EVERY = 8;
         private const int F1_WIN_SIZE = 10;
@@ -87,7 +93,7 @@ namespace GrafikWPF
         // Bufor F2 (mniej alokacji)
         private readonly List<int> _tmp = new List<int>(64);
 
-        // (historyczne flagi – nieużywane bezpośrednio po integracji reguł)
+        // (historyczne flagi – trzymamy dla kompatybilności)
         private readonly bool _bcBreaksAdjacent = true;
         private readonly int _mwMax = 1;
 
@@ -130,33 +136,47 @@ namespace GrafikWPF
         // ===================== API =====================
         public RozwiazanyGrafik ZnajdzOptymalneRozwiazanie()
         {
-            SolverDiagnostics.Start("BacktrackingSolver.Det");
+            SolverDiagnostics.Start("BacktrackingSolver.Det+Strict");
 
-            // F1 – ciągłość od początku (sekwencyjnie)
+            // F1 – ciągłość od początku (sekwencyjnie) + najlepszy prefiks
             F1_MaximizePrefix();
 
-            // Odtwórz najlepszy prefiks i przejdź do F2
-            if (_bestPrefixAssign != null)
+            // STRICT: zbierz wszystkie najlepsze prefiksy o długości _bestPrefixLen
+            if (STRICT_MODE != StrictMode.Off)
             {
-                ApplyPrefixSnapshot(_bestPrefixAssign, _bestPrefixLen);
-                F2_MaximizeCoverageFrom(_bestPrefixLen);
+                _strictPrefixes = new List<int[]>(Math.Min(256, STRICT_MAX_PREFIXES));
+                CollectAllBestPrefixes();
+            }
+
+            RozwiazanyGrafik sol;
+
+            if (STRICT_MODE == StrictMode.Off)
+            {
+                // Heurystyczne F2
+                if (_bestPrefixAssign != null)
+                {
+                    ApplyPrefixSnapshot(_bestPrefixAssign, _bestPrefixLen);
+                    F2_MaximizeCoverageFrom(_bestPrefixLen);
+                }
+                else
+                {
+                    ApplyPrefixSnapshot(Array.Empty<int>(), 0);
+                    F2_MaximizeCoverageFrom(0);
+                }
+
+                sol = BuildSolution();
+                var score = EvaluateSolution(sol);
+                if (_best is null || Better(score, _bestScore!))
+                {
+                    _best = sol; _bestScore = score;
+                    SolverDiagnostics.Log($"[BEST] vec={FormatScore(score)}");
+                }
             }
             else
             {
-                ApplyPrefixSnapshot(Array.Empty<int>(), 0);
-                F2_MaximizeCoverageFrom(0);
-            }
-
-            var sol = BuildSolution();
-
-            // *** WSPÓLNY WEKTOR JAKOŚCI ***
-            var score = EvaluateSolution(sol);
-
-            if (_best is null || Better(score, _bestScore!))
-            {
-                _best = sol;
-                _bestScore = score;
-                SolverDiagnostics.Log($"[BEST] vec={FormatScore(score)}");
+                // STRICT B&B (Half/Full)
+                StrictRun();
+                sol = BuildSolution(); // po StrictRun() w _assign mamy najlepszy znaleziony
             }
 
             SolverDiagnostics.Stop();
@@ -174,10 +194,7 @@ namespace GrafikWPF
                     var sym = _docs[j].Symbol;
                     TypDostepnosci td = TypDostepnosci.Niedostepny;
                     Dictionary<string, TypDostepnosci> map;
-                    if (_av.TryGetValue(date, out map) && map.TryGetValue(sym, out td))
-                    {
-                        // ok
-                    }
+                    if (_av.TryGetValue(date, out map) && map.TryGetValue(sym, out td)) { }
                     byte code;
                     switch (td)
                     {
@@ -278,7 +295,61 @@ namespace GrafikWPF
             DFS(0);
         }
 
-        // --- F1: porządkowanie kandydatów (SchedulingRules + buckety) ---
+        // STRICT: zbieranie wszystkich najlepszych prefiksów (#1)
+        private void CollectAllBestPrefixes()
+        {
+            if (_bestPrefixLen == 0) { _strictPrefixes!.Add(new int[0]); return; }
+
+            var curA = new int[_days.Count]; Array.Fill(curA, UNASSIGNED);
+            var curW = new int[_docs.Count];
+            var curM = new int[_docs.Count];
+            int collected = 0;
+
+            void DFS(int day)
+            {
+                _token.ThrowIfCancellationRequested();
+                if (day == _bestPrefixLen)
+                {
+                    if (collected < STRICT_MAX_PREFIXES)
+                    {
+                        var snap = new int[_bestPrefixLen];
+                        Array.Copy(curA, snap, _bestPrefixLen);
+                        _strictPrefixes!.Add(snap);
+                        collected++;
+                    }
+                    else
+                    {
+                        SolverDiagnostics.Log($"[STRICT] Osiągnięto limit prefiksów ({STRICT_MAX_PREFIXES}). Gwarancja pełna może nie być udowodniona.");
+                        return;
+                    }
+                    return;
+                }
+
+                // UB: jeśli nie da się dobić do _bestPrefixLen – tnij
+                int ub = F1_SuffixUpperBoundCached(day, curW);
+                if (day + ub < _bestPrefixLen) return;
+
+                var cands = F1_OrderCandidates(day, curA, curW, curM);
+                foreach (var doc in cands)
+                {
+                    if (!F1_IsFeasible(day, doc, curA, curW, curM)) continue;
+                    if (!KeepsNextFeasible(day, doc, curA, curW, curM)) continue;
+
+                    byte code = _pref[day, doc];
+                    curA[day] = doc; curW[doc]++; if (code == PREF_MW) curM[doc]++;
+                    DFS(day + 1);
+                    if (code == PREF_MW) curM[doc]--; curW[doc]--; curA[day] = UNASSIGNED;
+
+                    if (_strictPrefixes!.Count >= STRICT_MAX_PREFIXES) return;
+                }
+            }
+
+            DFS(0);
+
+            SolverDiagnostics.Log($"[STRICT] Zebrano prefiksów o dł. {_bestPrefixLen}: {_strictPrefixes!.Count}");
+        }
+
+        // ===================== F1: pomocnicze =====================
         private List<int> F1_OrderCandidates(int day, int[] curAssign, int[] curWork, int[] curMW)
         {
             // Kontekst na bazie LOKALNEGO stanu F1
@@ -287,7 +358,7 @@ namespace GrafikWPF
             // 1) Globalny, deterministyczny porządek wg wspólnych reguł
             var orderedAll = SchedulingRules.OrderCandidates(day, ctx);
 
-            // 2) Rezerwacje – jeżeli jakieś są i wykonalne, bierzemy tylko je
+            // 2) Rezerwacje – jeśli wykonalne, tylko je
             var rz = new List<int>();
             for (int i = 0; i < orderedAll.Count; i++)
             {
@@ -295,11 +366,7 @@ namespace GrafikWPF
                 if (_pref[day, p] == PREF_RZ && SchedulingRules.IsHardFeasible(day, p, ctx))
                     rz.Add(p);
             }
-            if (rz.Count > 0)
-            {
-                SolverDiagnostics.Log($"[F1] RZ wymuszone – kandydaci: {string.Join(", ", rz.Select(i => _docs[i].Symbol))}");
-                return rz;
-            }
+            if (rz.Count > 0) return rz;
 
             // 3) Szybkie sito bucketowe (BC→CH→MG→MW) + limity + twarda wykonalność
             var allowed = new HashSet<int>();
@@ -322,7 +389,7 @@ namespace GrafikWPF
 
             if (allowed.Count == 0) return new List<int>();
 
-            // 4) KOLEJNOŚĆ: tylko ci, którzy przeszli nasze sito, ale
+            // 4) KOLEJNOŚĆ: tylko ci, którzy przeszli sito, ale
             //    w kolejności ustalonej przez SchedulingRules.OrderCandidates(...)
             var result = new List<int>(allowed.Count);
             for (int i = 0; i < orderedAll.Count; i++)
@@ -362,7 +429,7 @@ namespace GrafikWPF
             return ok;
         }
 
-        // ===================== F2: Maksymalizacja obsady (greedy) =====================
+        // ===================== F2: Heurystyczne (gdy STRICT=Off) =====================
         private void F2_MaximizeCoverageFrom(int startDay)
         {
             _filled = 0;
@@ -486,6 +553,190 @@ namespace GrafikWPF
             _filled++;
         }
 
+        // ===================== STRICT: Branch & Bound =====================
+        private int _bbNodes;
+        private long[]? _incumbentVec;        // najlepszy wektor (lex) znaleziony w STRICT
+        private int[]? _incumbentA;          // odpowiadające przypisania (snapshot)
+        private bool _proofComplete = true;
+
+        private void StrictRun()
+        {
+            // iteruj po wszystkich najlepszych prefiksach
+            var prefixes = (_strictPrefixes != null && _strictPrefixes.Count > 0)
+                           ? _strictPrefixes
+                           : new List<int[]> { _bestPrefixAssign ?? Array.Empty<int>() };
+
+            _incumbentVec = null;
+            _incumbentA = null;
+
+            foreach (var pref in prefixes)
+            {
+                // 1) Zastosuj prefiks do stanu globalnego
+                ApplyPrefixSnapshot(pref, _bestPrefixLen);
+
+                // 2) Incumbent z heurystycznego F2 (szybki, bardzo dobry start)
+                var bakA = (int[])_assign.Clone();
+                var bakW = (int[])_workPerDoc.Clone();
+                var bakM = (int[])_mwUsed.Clone();
+                int bakF = _filled;
+
+                F2_MaximizeCoverageFrom(_bestPrefixLen);
+                var sol0 = BuildSolution();
+                var vec0 = EvaluateSolution(sol0);
+                UpdateIncumbent(vec0, (int[])_assign.Clone());
+
+                // Przywróć prefiks (wracamy do czystego stanu przed B&B)
+                Array.Copy(bakA, _assign, _assign.Length);
+                Array.Copy(bakW, _workPerDoc, _workPerDoc.Length);
+                Array.Copy(bakM, _mwUsed, _mwUsed.Length);
+                _filled = bakF;
+
+                // 3) Uruchom B&B na reszcie dni
+                _bbNodes = 0;
+                StrictBB_From(_bestPrefixLen,
+                              (int[])_assign.Clone(),
+                              (int[])_workPerDoc.Clone(),
+                              (int[])_mwUsed.Clone());
+            }
+
+            // Po wszystkich prefiksach – ustaw najlepsze znalezione przypisania do stanu globalnego
+            if (_incumbentA != null)
+            {
+                ApplyFromAssignArray(_incumbentA);
+                var sol = BuildSolution();
+                var vec = EvaluateSolution(sol);
+                _best = sol; _bestScore = vec;
+                SolverDiagnostics.Log($"[STRICT] BEST vec={FormatScore(vec)} nodes={_bbNodes} proof={_proofComplete}");
+            }
+        }
+
+        private void StrictBB_From(int day, int[] curA, int[] curW, int[] curM)
+        {
+            _token.ThrowIfCancellationRequested();
+            if (_bbNodes++ > STRICT_NODE_LIMIT)
+            {
+                _proofComplete = false;
+                return;
+            }
+
+            // Znajdź kolejny "otwarty" dzień
+            int d = day;
+            while (d < _days.Count && curA[d] != UNASSIGNED) d++;
+            if (d >= _days.Count)
+            {
+                // Liść – oceń
+                var vec = EvaluateVectorFromArrays(curA, curW, curM);
+                UpdateIncumbent(vec, (int[])curA.Clone());
+                return;
+            }
+
+            // Oblicz UB dla #2 (łączna obsada) od d do końca
+            int assignedSoFar = CountAssignedUpTo(curA, d);              // pełne dni [0..d-1]
+            int remUB = F1_SuffixUpperBoundCached(d, curW);              // górne ograniczenie obsady "od d"
+            int potential2 = assignedSoFar + remUB + CountAssignedFrom(curA, d + 1);
+
+            if (_incumbentVec != null)
+            {
+                // Jeżeli nie przebijemy #2 – tnij
+                int idx2 = IndexOfPriority(SolverPriority.LacznaLiczbaObsadzonychDni);
+                if (potential2 < _incumbentVec[idx2]) return;
+            }
+
+            // Kandydaci (wg wspólnych reguł), + opcja "pusty dzień"
+            var ctx = BuildCtx(false, curA, curW, curM);
+            var ordered = SchedulingRules.OrderCandidates(d, ctx);
+            var opts = new List<int>(ordered.Count + 1);
+            for (int i = 0; i < ordered.Count; i++)
+            {
+                int p = ordered[i];
+                if (SchedulingRules.IsHardFeasible(d, p, ctx))
+                    opts.Add(p);
+            }
+            // Dodaj "pusty" wybór – potrzebny dla optimum #2 w obecności ograniczeń globalnych
+            const int EMPTY_SENTINEL = -999999;
+            opts.Add(EMPTY_SENTINEL);
+
+            // Heurystyka kolejności: najpierw realne przydziały, na końcu "pusty"
+            foreach (var choice in opts)
+            {
+                if (choice == EMPTY_SENTINEL)
+                {
+                    // "pusty" dzień
+                    curA[d] = EMPTY;
+                    StrictBB_From(d + 1, curA, curW, curM);
+                    curA[d] = UNASSIGNED;
+                }
+                else
+                {
+                    byte code = _pref[d, choice];
+                    curA[d] = choice; curW[choice]++; if (code == PREF_MW) curM[choice]++;
+                    StrictBB_From(d + 1, curA, curW, curM);
+                    if (code == PREF_MW) curM[choice]--; curW[choice]--; curA[d] = UNASSIGNED;
+                }
+            }
+        }
+
+        private int CountAssignedUpTo(int[] a, int endExclusive)
+        {
+            int c = 0;
+            for (int i = 0; i < endExclusive; i++) if (a[i] >= 0) c++;
+            return c;
+        }
+        private int CountAssignedFrom(int[] a, int startInclusive)
+        {
+            int c = 0;
+            for (int i = startInclusive; i < a.Length; i++) if (a[i] >= 0) c++;
+            return c;
+        }
+
+        private void UpdateIncumbent(long[] vec, int[] assignSnap)
+        {
+            if (_incumbentVec == null || Better(vec, _incumbentVec))
+            {
+                // FULL: porównujemy pełny wektor (lex wg _priorities).
+                // HALF: gwarantujemy #2 przez to samo porównanie (jeśli #2 równe, stabilne tie-breaki wybiorą deterministycznie).
+                _incumbentVec = vec;
+                _incumbentA = assignSnap;
+                SolverDiagnostics.Log($"[STRICT][INCUMBENT] vec={FormatScore(vec)}");
+            }
+        }
+
+        private void ApplyFromAssignArray(int[] A)
+        {
+            for (int d = 0; d < _days.Count; d++) _assign[d] = UNASSIGNED;
+            Array.Fill(_workPerDoc, 0);
+            Array.Fill(_mwUsed, 0);
+            _filled = 0;
+
+            for (int d = 0; d < _days.Count; d++)
+            {
+                int doc = A[d];
+                if (doc >= 0)
+                {
+                    _assign[d] = doc;
+                    _workPerDoc[doc]++;
+                    if (_pref[d, doc] == PREF_MW) _mwUsed[doc]++;
+                    _filled++;
+                }
+                else if (doc == EMPTY)
+                {
+                    _assign[d] = EMPTY;
+                }
+            }
+        }
+
+        private long[] EvaluateVectorFromArrays(int[] curA, int[] curW, int[] curM)
+        {
+            var ctx = BuildCtx(false, curA, curW, curM);
+
+            var sol = new RozwiazanyGrafik { Przypisania = new Dictionary<DateTime, Lekarz?>() };
+            for (int d = 0; d < _days.Count; d++)
+                sol.Przypisania[_days[d]] = curA[d] >= 0 ? _docs[curA[d]] : null;
+
+            return SchedulingRules.EvaluateSolution(sol, _priorities, ctx);
+        }
+
+        // ===================== Build/Eval/Utils =====================
         private RozwiazanyGrafik BuildSolution()
         {
             var sol = new RozwiazanyGrafik { Przypisania = new Dictionary<DateTime, Lekarz?>() };
@@ -494,14 +745,12 @@ namespace GrafikWPF
             return sol;
         }
 
-        // *** Wspólna ocena jakości ***
         private long[] EvaluateSolution(RozwiazanyGrafik sol)
         {
             var ctx = BuildCtx(false);
             return SchedulingRules.EvaluateSolution(sol, _priorities, ctx);
         }
 
-        // ===================== Utils =====================
         private SchedulingRules.Context BuildCtx(bool isPrefixActive, int[] assign = null, int[] work = null, int[] mw = null)
         {
             var limits = new Dictionary<string, int>(_docs.Count);
@@ -526,30 +775,23 @@ namespace GrafikWPF
             );
         }
 
+        private static int IndexOfPriority(SolverPriority p)
+        {
+            // zakładamy, że _priorities zawiera wszystkie 4; jeśli nie – fallback 0
+            switch (p)
+            {
+                case SolverPriority.CiagloscPoczatkowa: return 0;
+                case SolverPriority.LacznaLiczbaObsadzonychDni: return 1;
+                case SolverPriority.SprawiedliwoscObciazenia: return 2;
+                case SolverPriority.RownomiernoscRozlozenia: return 3;
+                default: return 0;
+            }
+        }
+
         private double RatioAfter(int work, int limit)
         {
             double lim = Math.Max(1, limit);
             return (work + 1) / lim;
-        }
-
-        private int NearestAssignedDistance(int day, int doc, int[] curAssign)
-        {
-            int best = int.MaxValue;
-            for (int d = day - 1; d >= 0; d--)
-                if (curAssign[d] == doc) { best = Math.Min(best, day - d); break; }
-            for (int d = day + 1; d < _days.Count; d++)
-                if (curAssign[d] == doc) { best = Math.Min(best, d - day); break; }
-            return best == int.MaxValue ? 9999 : best;
-        }
-
-        private int NearestAssignedDistanceGlobal(int day, int doc)
-        {
-            int best = int.MaxValue;
-            for (int d = day - 1; d >= 0; d--)
-                if (_assign[d] == doc) { best = Math.Min(best, day - d); break; }
-            for (int d = day + 1; d < _days.Count; d++)
-                if (_assign[d] == doc) { best = Math.Min(best, d - day); break; }
-            return best == int.MaxValue ? 9999 : best;
         }
 
         private string PrefToString(byte code)
@@ -602,6 +844,7 @@ namespace GrafikWPF
 
         private bool Better(long[] cur, long[] best)
         {
+            // porównanie leksykograficzne wg kolejności _priorities
             int n = Math.Min(cur.Length, best.Length);
             for (int i = 0; i < n; i++)
             {
@@ -643,6 +886,7 @@ namespace GrafikWPF
             _bucketsReady = true;
         }
 
+        // ====== UB (flow) – współdzielone przez F1 i STRICT B&B ======
         private int F1_SuffixUpperBoundCached(int startDay, int[] curWork)
         {
             var key = (startDay, HashRemCap(curWork));

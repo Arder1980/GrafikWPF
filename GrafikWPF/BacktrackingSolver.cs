@@ -8,10 +8,10 @@ using System.Threading;
 namespace GrafikWPF
 {
     /// <summary>
-    /// Backtracking z priorytetem ciągłości (gdy wybrany przez użytkownika) i ochroną CH/BC:
+    /// Backtracking z priorytetem ciągłości (gdy wybrany przez użytkownika).
     /// - Rolling horizon (K<=7) egzekwowany twardo na froncie ciągłości,
     /// - CRP: wybór kandydata maksymalizującego gwarantowany prefiks w oknie,
-    /// - Inteligentna ochrona CH/BC (balans U(c) vs R(c)),
+    /// - (WYŁĄCZONE w ETAP 1) rezerwowanie CH/BC w przyszłość,
     /// - Adaptacyjna lokalna naprawa pierwszej dziury (cofka 5–7),
     /// - MW = 1 na osobę,
     /// - Reguły sąsiedztwa: BC może łamać „dzień-po-dniu” i „Inny dyżur ±1”; MG/CH/MW nie mogą.
@@ -31,10 +31,12 @@ namespace GrafikWPF
         private const int UNASSIGNED = int.MinValue;
         private const int EMPTY = -1;
 
-        // Rolling horizon / CRP / ochrona CH/BC
+        // Rolling horizon / CRP
         private const int RH_MIN_K = 2;
         private const int RH_MAX_K = 7; // okno przodu dla prefiksu
-        private const int CH_PROTECT_K = 7; // okno dla balansu U(c)/R(c)
+
+        // (Pozostawione dla ewentualnego późniejszego użycia w ETAP 5; aktualnie nieużywane)
+        private const int CH_PROTECT_K = 7; // okno dla balansu U(c)/R(c) – TERAZ WYŁĄCZONE
 
         // LocalRepair
         private const int LR_MIN_BACK = 5;
@@ -143,30 +145,21 @@ namespace GrafikWPF
             SolverDiagnostics.Log("=== Start BacktrackingSolver ===");
             SolverDiagnostics.Log($"Dni: {_days.Count}, lekarze: {_docs.Count}");
             SolverDiagnostics.Log($"Priorytety: {string.Join(", ", _priorities)}");
+
             // === ETAP 0: Nagłówek statusu polityk (tylko log, zero zmian logiki) ===
             try
             {
-                // Nazwa solvera do raportu
                 const string solverName = "Backtracking";
-
-                // Kolejność priorytetów – dynamicznie z tego, co masz w solverze/UI
-                // Jeśli masz pole prywatne z listą priorytetów, użyj go;
-                // jeśli nie – sięgnij po DataManager.AppData.KolejnoscPriorytetowSolvera.
                 IReadOnlyList<SolverPriority> pri =
                     _priorities ?? DataManager.AppData.KolejnoscPriorytetowSolvera;
 
-                // Stan polityk – na ETAP 0 logujemy bez wymuszania niczego w logice.
-                // USTALENIA: CHProtect=OFF (bez twardego rezerwowania CH/BC),
-                // BC_breaks_adjacent=TRUE (BC może łamać sąsiedztwo ±1),
-                // MW_max=1 (maks. 1 dzień „Mogę warunkowo” na lekarza).
-                // Rolling horizon i LocalRepair podaj wg tego, co masz TERAZ:
-                // jeżeli masz stałe K=2 i brak LocalRepair → wpisz (2,2) i (0,0).
-                bool chProtectEnabled = false; // ma być WYŁĄCZONE
+                bool chProtectEnabled = false; // WYŁĄCZONE
                 bool bcBreaksAdjacent = true;  // BC może łamać ±1
                 int mwMax = 1;     // maks. 1 MW na osobę
-                var rhK = (min: 2, max: 2);   // jeśli teraz używasz K=2
-                var lrBack = (min: 0, max: 0);   // jeśli nie masz LocalRepair – 0,0
-                var lrFwd = (min: 0, max: 0);   // jw.
+
+                var rhK = (min: RH_MIN_K, max: RH_MAX_K);
+                var lrBack = (min: LR_MIN_BACK, max: LR_MAX_BACK);
+                var lrFwd = (min: LR_FWD, max: LR_FWD);
 
                 SolverPolicyStatus.LogStartupHeader(
                     solverName: solverName,
@@ -181,10 +174,10 @@ namespace GrafikWPF
             }
             catch (Exception ex)
             {
-                // Diagnostyka nie może zabić solvera – tylko logujemy błąd i jedziemy dalej
                 SolverDiagnostics.Log("[Policy] Header logging failed: " + ex.Message);
             }
             // === /ETAP 0 ===
+
             LogLimits();
             LogLegendAndAvailability();
 
@@ -200,6 +193,23 @@ namespace GrafikWPF
                     dict[_days[d]] = _assign[d] >= 0 ? _docs[_assign[d]] : null;
                 _best = new RozwiazanyGrafik { Przypisania = dict };
             }
+
+            // Podsumowanie polityk po biegu (diagnostyka)
+            try
+            {
+                int total = _days.Count;
+                int filled = _best.Przypisania.Count(kv => kv.Value != null);
+                int prefix = 0;
+                for (int i = 0; i < _days.Count; i++)
+                {
+                    if (!_best.Przypisania.TryGetValue(_days[i], out var l) || l is null) break;
+                    prefix++;
+                }
+                int empty = total - filled;
+                SolverPolicyStatus.LogPostRunSummary("Backtracking", total, filled, prefix, empty);
+            }
+            catch { /* no-op */ }
+
             return _best!;
         }
 
@@ -218,14 +228,13 @@ namespace GrafikWPF
 
             var candidates = OrderCandidates(day);
 
-            // Rolling-horizon + CRP + ochrona CH/BC tylko na froncie prefiksu (gdy ciągłość to priorytet #1)
+            // Rolling-horizon + CRP tylko na froncie prefiksu (gdy ciągłość to priorytet #1)
             bool continuityFirst = _priorities.Count > 0 && _priorities[0] == SolverPriority.CiagloscPoczatkowa;
             bool atPrefixFront = _isPrefixActive && day == PrefixLength();
 
             if (continuityFirst && atPrefixFront && candidates.Count > 0)
             {
-                // Inteligentna ochrona CH/BC (R(c) > U(c)) – wytnij ruchy ryzykowne
-                candidates = FilterByCoverBalance(day, candidates, CH_PROTECT_K);
+                // (ETAP 1) BRAK twardej ochrony CH/BC – nie wzywamy FilterByCoverBalance
 
                 // Rolling horizon: wymagaj wykonalności okna
                 var filtered = FilterByRollingFeasibility(day, candidates);
@@ -241,16 +250,9 @@ namespace GrafikWPF
             }
             else
             {
-                // Po prefiksie: nie filtrujemy „na twardo”, ale karzemy psucie CH/BC w rankingu
+                // Po prefiksie: brak kar za „przyszłe CH/BC” – czyste dynamiczne priorytety
                 if (candidates.Count > 1)
-                    candidates.Sort((a, b) =>
-                    {
-                        int pa = FutureCHPenalty(day, a, CH_PROTECT_K);
-                        int pb = FutureCHPenalty(day, b, CH_PROTECT_K);
-                        int cmp = pa.CompareTo(pb);
-                        if (cmp != 0) return cmp;
-                        return CompareCandidates(day, a, b);
-                    });
+                    candidates.Sort((a, b) => CompareCandidates(day, a, b));
             }
 
             if (candidates.Count == 0)
@@ -355,9 +357,9 @@ namespace GrafikWPF
             var map = new Dictionary<SolverPriority, long>
             {
                 { SolverPriority.LacznaLiczbaObsadzonychDni, obsBound },
-                { SolverPriority.CiagloscPoczatkowa, contBound },
-                { SolverPriority.SprawiedliwoscObciazenia, fairBound },
-                { SolverPriority.RownomiernoscRozlozenia, evenBound }
+                { SolverPriority.CiagloscPoczatkowa,         contBound },
+                { SolverPriority.SprawiedliwoscObciazenia,   fairBound },
+                { SolverPriority.RownomiernoscRozlozenia,     evenBound }
             };
 
             var vec = new long[_priorities.Count];
@@ -378,29 +380,9 @@ namespace GrafikWPF
             return len;
         }
 
-        // ====== Rolling horizon / CRP / Ochrona CH/BC ======
+        // ====== Rolling horizon / CRP ======
 
-        // (A) Ochrona CH/BC: wytnij ruchy z R(c) <= U(c)
-        private List<int> FilterByCoverBalance(int day, List<int> candidates, int k)
-        {
-            int end = Math.Min(_days.Count - 1, day + k);
-            var ok = new List<int>(candidates.Count);
-
-            foreach (var p in candidates)
-            {
-                var codeToday = _pref[day, p];
-                int U = UniqueCHBCForDocInWindow(p, day + 1, end, day, p, codeToday);
-                int R = RealSlotsForDocInWindow(p, day + 1, end, day, p, codeToday);
-
-                SolverDiagnostics.Log($"[CHProtect] {FormatDay(day)} {_docs[p].Symbol}: U={U}, R={R}");
-
-                if (R > U) ok.Add(p);
-                else SolverDiagnostics.Log($"[CHProtect] Odrzucono {_docs[p].Symbol} – R<=U w oknie.");
-            }
-            return ok;
-        }
-
-        // (B) Rolling-horizon – wymagaj wykonalności okna (po ochronie CH/BC)
+        // (B) Rolling-horizon – wymagaj wykonalności okna
         private List<int> FilterByRollingFeasibility(int day, List<int> cand)
         {
             for (int K = RH_MIN_K; K <= RH_MAX_K; K++)
@@ -795,10 +777,9 @@ namespace GrafikWPF
                     nodes++;
                     var cand = OrderCandidates(d);
 
-                    // mini-prefiks w oknie: ochrona CH/BC i RH + CRP też mają sens
+                    // mini-prefiks w oknie: (ETAP 1) bez twardej ochrony CH/BC; RH + CRP zostają
                     if (_priorities.Count > 0 && _priorities[0] == SolverPriority.CiagloscPoczatkowa)
                     {
-                        cand = FilterByCoverBalance(d, cand, CH_PROTECT_K);
                         var ok = FilterByRollingFeasibility(d, cand);
                         if (ok.Count > 0) cand = OrderByCRP(d, ok, RH_MAX_K);
                         else cand.Clear();
@@ -1063,7 +1044,7 @@ namespace GrafikWPF
             _ => "--"
         };
 
-        // ====== Ochrona CH/BC – U(c) vs R(c) i kara rankingowa ======
+        // ====== (Wyłączone) ochrona CH/BC – pozostawione dla ETAP 5 ======
         private int UniqueCHBCForDocInWindow(int doc, int wStart, int wEnd, int day0, int doc0, byte code0)
         {
             if (wStart > wEnd) return 0;
@@ -1073,7 +1054,6 @@ namespace GrafikWPF
             {
                 if (_assign[d] != UNASSIGNED) continue;
 
-                // czy dzień w ogóle ma CH/BC dla kogoś?
                 bool hasChBc = false;
                 for (int q = 0; q < _docs.Count; q++)
                 {
@@ -1082,7 +1062,6 @@ namespace GrafikWPF
                 }
                 if (!hasChBc) continue;
 
-                // policz ilu kandydatów CH/BC będzie wykonalnych po wzięciu (day0,doc0)
                 int feasibleCh = 0;
                 int who = -1;
                 for (int q = 0; q < _docs.Count; q++)
@@ -1119,14 +1098,8 @@ namespace GrafikWPF
 
         private int FutureCHPenalty(int day, int doc, int k)
         {
-            int end = Math.Min(_days.Count - 1, day + k);
-            byte code0 = _pref[day, doc];
-            int U = UniqueCHBCForDocInWindow(doc, day + 1, end, day, doc, code0);
-            int R = RealSlotsForDocInWindow(doc, day + 1, end, day, doc, code0);
-
-            // Kara: im bardziej R<=U, tym większa kara (mniejsza preferencja)
-            if (R > U) return 0;
-            return (U - R + 1) * 100; // duża kara, by spaść w kolejce
+            // ETAP 1: ochrona CH/BC wyłączona -> brak kary
+            return 0;
         }
 
         // ====== Operacje na stanie ======
@@ -1292,9 +1265,9 @@ namespace GrafikWPF
             var map = new Dictionary<SolverPriority, long>
             {
                 { SolverPriority.LacznaLiczbaObsadzonychDni, sObs },
-                { SolverPriority.CiagloscPoczatkowa, sCont },
-                { SolverPriority.SprawiedliwoscObciazenia, sFair },
-                { SolverPriority.RownomiernoscRozlozenia, sEven }
+                { SolverPriority.CiagloscPoczatkowa,         sCont },
+                { SolverPriority.SprawiedliwoscObciazenia,   sFair },
+                { SolverPriority.RownomiernoscRozlozenia,     sEven }
             };
 
             var vec = new long[_priorities.Count];

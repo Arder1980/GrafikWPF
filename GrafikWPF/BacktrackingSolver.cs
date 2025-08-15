@@ -1,4 +1,4 @@
-#nullable enable
+using System.Text;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -22,16 +22,16 @@ namespace GrafikWPF
     {
         // Preferencje / kody
         private const byte PREF_NONE = 0; // brak / niedostępny
-        private const byte PREF_MW   = 1; // Mogę warunkowo (max 1 w miesiącu)
-        private const byte PREF_MG   = 2; // Mogę
-        private const byte PREF_CH   = 3; // Chcę
-        private const byte PREF_BC   = 4; // Bardzo chcę
-        private const byte PREF_RZ   = 5; // Rezerwacja (musi być)
-        private const byte PREF_OD   = 6; // Dyżur (inny) – dzień +/-1 (blok sąsiedztwa dla MG/CH/MW)
+        private const byte PREF_MW = 1; // Mogę warunkowo (max 1 w miesiącu)
+        private const byte PREF_MG = 2; // Mogę
+        private const byte PREF_CH = 3; // Chcę
+        private const byte PREF_BC = 4; // Bardzo chcę
+        private const byte PREF_RZ = 5; // Rezerwacja (musi być)
+        private const byte PREF_OD = 6; // Dyżur (inny) – dzień +/-1 (blok sąsiedztwa dla MG/CH/MW)
 
         // Stany przypisań
         private const int UNASSIGNED = int.MinValue;
-        private const int EMPTY      = -1;
+        private const int EMPTY = -1;
 
         private readonly GrafikWejsciowy _input;
         private readonly IReadOnlyList<SolverPriority> _priorities;
@@ -57,13 +57,13 @@ namespace GrafikWPF
         private long[]? _bestScore;
 
         // F1 – prefiks
-        private int   _bestPrefixLen;
+        private int _bestPrefixLen;
         private int[]? _bestPrefixAssign; // snapshot assign dla najlepszego prefiksu
 
         // Polityki (na teraz: CHProtect OFF, BC może łamać sąsiedztwo, MW<=1)
         private readonly bool _chProtectEnabled = false;
         private readonly bool _bcBreaksAdjacent = true;
-        private readonly int  _mwMax = 1;
+        private readonly int _mwMax = 1;
 
         public BacktrackingSolver(GrafikWejsciowy input,
                                   IReadOnlyList<SolverPriority> priorities,
@@ -178,11 +178,11 @@ namespace GrafikWPF
                     _pref[d, j] = td switch
                     {
                         TypDostepnosci.MogeWarunkowo => PREF_MW,
-                        TypDostepnosci.Moge          => PREF_MG,
-                        TypDostepnosci.Chce          => PREF_CH,
-                        TypDostepnosci.BardzoChce    => PREF_BC,
-                        TypDostepnosci.Rezerwacja    => PREF_RZ,
-                        TypDostepnosci.DyzurInny     => PREF_OD,
+                        TypDostepnosci.Moge => PREF_MG,
+                        TypDostepnosci.Chce => PREF_CH,
+                        TypDostepnosci.BardzoChce => PREF_BC,
+                        TypDostepnosci.Rezerwacja => PREF_RZ,
+                        TypDostepnosci.DyzurInny => PREF_OD,
                         _ => PREF_NONE
                     };
                 }
@@ -194,8 +194,8 @@ namespace GrafikWPF
         {
             var curAssign = new int[_days.Count];
             Array.Fill(curAssign, UNASSIGNED);
-            var curWork  = new int[_docs.Count];
-            var curMW    = new int[_docs.Count];
+            var curWork = new int[_docs.Count];
+            var curMW = new int[_docs.Count];
             int prefixLen = 0;
 
             void DFS(int day)
@@ -208,7 +208,7 @@ namespace GrafikWPF
                 {
                     _bestPrefixLen = day;
                     _bestPrefixAssign = (int[])curAssign.Clone();
-                    SolverDiagnostics.Log($"[F1] Nowy najlepszy prefiks: {_bestPrefixLen} ({FormatDay(_bestPrefixLen-1)})");
+                    SolverDiagnostics.Log($"[F1] Nowy najlepszy prefiks: {_bestPrefixLen} ({FormatDay(_bestPrefixLen - 1)})");
                 }
                 if (day >= _days.Count) return;
 

@@ -103,67 +103,73 @@ namespace GrafikWPF
         // ===================== API =====================
         public RozwiazanyGrafik ZnajdzOptymalneRozwiazanie()
         {
-            // Nagłówek diagnostyki / polityk
-            try
+            if (!SolverDiagnostics.IsActive)
             {
-                var pri = _priorities ?? DataManager.AppData.KolejnoscPriorytetowSolvera;
-                SolverPolicyStatus.LogStartupHeader(
-                    solverName: "Backtracking",
-                    priorities: pri,
-                    chProtectEnabled: _chProtectEnabled,
-                    bcBreaksAdjacent: _bcBreaksAdjacent,
-                    mwMax: _mwMax,
-                    rhK: (2, 2),     // Rolling Horizon: min=2, max=2 (w tym solverze RH nie używamy)
-                    lrBack: (0, 0),  // LocalRepair back: wyłączone
-                    lrFwd: (0, 0)    // LocalRepair fwd: wyłączone
-                );
+                SolverDiagnostics.Enabled = true;
+                SolverDiagnostics.Start();
             }
-            catch (Exception ex)
-            {
-                SolverDiagnostics.Log("[Policy] Header logging failed: " + ex.Message);
+                // Nagłówek diagnostyki / polityk
+                try
+                {
+                    var pri = _priorities ?? DataManager.AppData.KolejnoscPriorytetowSolvera;
+                    SolverPolicyStatus.LogStartupHeader(
+                        solverName: "Backtracking",
+                        priorities: pri,
+                        chProtectEnabled: _chProtectEnabled,
+                        bcBreaksAdjacent: _bcBreaksAdjacent,
+                        mwMax: _mwMax,
+                        rhK: (2, 2),     // Rolling Horizon: min=2, max=2 (w tym solverze RH nie używamy)
+                        lrBack: (0, 0),  // LocalRepair back: wyłączone
+                        lrFwd: (0, 0)    // LocalRepair fwd: wyłączone
+                    );
+                }
+                catch (Exception ex)
+                {
+                    SolverDiagnostics.Log("[Policy] Header logging failed: " + ex.Message);
+                }
+
+                SolverDiagnostics.Log("=== Start BacktrackingSolver (Adam) ===");
+                SolverDiagnostics.Log($"Dni: {_days.Count}, lekarze: {_docs.Count}");
+                SolverDiagnostics.Log($"Priorytety: {string.Join(", ", _priorities)}");
+                LogLimits();
+                LogLegendAndAvailability();
+
+                // Faza 1: Maksymalizacja prefiksu (jeśli priorytet #1 to Ciągłość; w przeciwnym razie – pusta F1)
+                bool continuityFirst = _priorities.Count > 0 && _priorities[0] == SolverPriority.CiagloscPoczatkowa;
+                if (continuityFirst)
+                {
+                    SolverDiagnostics.Log("[F1] Start – maksymalizacja ciągłości od początku");
+                    F1_MaximizePrefix();
+                    SolverDiagnostics.Log($"[F1] Stop – najlepszy prefiks = {_bestPrefixLen}");
+                }
+                else
+                {
+                    SolverDiagnostics.Log("[F1] Pominięto – priorytet #1 ≠ Ciągłość");
+                    _bestPrefixLen = 0;
+                }
+
+                // Zastosuj najlepszy prefiks do stanu głównego
+                if (_bestPrefixAssign != null && _bestPrefixLen > 0)
+                {
+                    ApplyPrefixSnapshot(_bestPrefixAssign, _bestPrefixLen);
+                }
+
+                // Faza 2: Maksymalizacja obsady reszty
+                SolverDiagnostics.Log("[F2] Start – maksymalizacja łącznej obsady pozostałych dni");
+                F2_MaximizeCoverageFrom(_bestPrefixLen);
+                SolverDiagnostics.Log("[F2] Stop");
+
+                // Finalizacja: scoring po zadanej kolejności priorytetów
+                var sol = SnapshotToSolution();
+                var score = EvaluateSolution(sol);
+                _best = sol;
+                _bestScore = score;
+                SolverDiagnostics.Log($"[BEST] vec={FormatScore(score)}");
+
+                return _best;
+                SolverDiagnostics.Stop();
             }
-
-            SolverDiagnostics.Log("=== Start BacktrackingSolver (Adam) ===");
-            SolverDiagnostics.Log($"Dni: {_days.Count}, lekarze: {_docs.Count}");
-            SolverDiagnostics.Log($"Priorytety: {string.Join(", ", _priorities)}");
-            LogLimits();
-            LogLegendAndAvailability();
-
-            // Faza 1: Maksymalizacja prefiksu (jeśli priorytet #1 to Ciągłość; w przeciwnym razie – pusta F1)
-            bool continuityFirst = _priorities.Count > 0 && _priorities[0] == SolverPriority.CiagloscPoczatkowa;
-            if (continuityFirst)
-            {
-                SolverDiagnostics.Log("[F1] Start – maksymalizacja ciągłości od początku");
-                F1_MaximizePrefix();
-                SolverDiagnostics.Log($"[F1] Stop – najlepszy prefiks = {_bestPrefixLen}");
-            }
-            else
-            {
-                SolverDiagnostics.Log("[F1] Pominięto – priorytet #1 ≠ Ciągłość");
-                _bestPrefixLen = 0;
-            }
-
-            // Zastosuj najlepszy prefiks do stanu głównego
-            if (_bestPrefixAssign != null && _bestPrefixLen > 0)
-            {
-                ApplyPrefixSnapshot(_bestPrefixAssign, _bestPrefixLen);
-            }
-
-            // Faza 2: Maksymalizacja obsady reszty
-            SolverDiagnostics.Log("[F2] Start – maksymalizacja łącznej obsady pozostałych dni");
-            F2_MaximizeCoverageFrom(_bestPrefixLen);
-            SolverDiagnostics.Log("[F2] Stop");
-
-            // Finalizacja: scoring po zadanej kolejności priorytetów
-            var sol = SnapshotToSolution();
-            var score = EvaluateSolution(sol);
-            _best = sol;
-            _bestScore = score;
-            SolverDiagnostics.Log($"[BEST] vec={FormatScore(score)}");
-
-            return _best;
-        }
-
+        
         // ===================== Prekomputacja =====================
         private void PrecomputeAvailability()
         {

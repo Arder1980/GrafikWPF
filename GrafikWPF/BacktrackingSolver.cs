@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
+using GrafikWPF.Algorithms; // +++ NEW: FlowUB (max-flow upper bound)
+
 
 namespace GrafikWPF
 {
@@ -59,6 +61,10 @@ namespace GrafikWPF
         // F1 – prefiks
         private int _bestPrefixLen;
         private int[]? _bestPrefixAssign; // snapshot assign dla najlepszego prefiksu
+
+        // +++ NEW (Krok 1): lekkie, bezpieczne przyspieszacze F1
+        private const bool F1_USE_FLOW_UB = true;   // włącz/wyłącz pruning na flow upper bound
+        private const int F1_FLOW_EVERY = 8;      // co ile poziomów F1 liczyć UB
 
         // Polityki (na teraz: CHProtect OFF, BC może łamać sąsiedztwo, MW<=1)
         private readonly bool _chProtectEnabled = false;
@@ -218,6 +224,18 @@ namespace GrafikWPF
                 }
                 if (day >= _days.Count) return;
 
+                // +++ NEW (Krok 1): pruning na optimistycznym UB (co F1_FLOW_EVERY poziomów)
+                if (F1_USE_FLOW_UB && (day % F1_FLOW_EVERY == 0))
+                {
+                    int ub = F1_SuffixUpperBound(day, curWork);
+                    int potential = day + ub;
+                    if (potential <= _bestPrefixLen)
+                    {
+                        SolverDiagnostics.Log($"[F1][UB-cut] {FormatDay(Math.Min(day, _days.Count - 1))}: UB={ub}, potential={potential} ≤ bestPref={_bestPrefixLen} → stop");
+                        return;
+                    }
+                }
+
                 // Kandydaci na ten dzień
                 var cands = F1_OrderCandidates(day, curAssign, curWork, curMW);
                 LogCandidates(day, cands, curAssign, curWork);
@@ -233,6 +251,13 @@ namespace GrafikWPF
                     byte code = _pref[day, doc];
                     // twarde zasady
                     if (!F1_IsFeasible(day, doc, curAssign, curWork, curMW)) continue;
+
+                    // +++ NEW (Krok 1): mikrosito d+1 – nie wchodzimy w wybór, jeśli zabija obsadę jutra
+                    if (!KeepsNextFeasible(day, doc, curAssign, curWork, curMW))
+                    {
+                        SolverDiagnostics.Log($"[F1] Prune d+1: {FormatDay(day)} ← {_docs[doc].Symbol} zablokuje {FormatDay(Math.Min(day + 1, _days.Count - 1))}");
+                        continue;
+                    }
 
                     // pick
                     curAssign[day] = doc;
@@ -358,6 +383,25 @@ namespace GrafikWPF
             curWork[doc]--;
             curAssign[day] = UNASSIGNED;
             return ok;
+        }
+        
+        // +++ NEW: optymistyczny górny limit pokrycia ogona (dzień..koniec) z lim. lekarzy
+        private int F1_SuffixUpperBound(int startDay, int[] curWork)
+        {
+            // Upper bound ignoruje reguły sąsiedztwa i MW — to celowe, ma przeszacowywać.
+            return FlowUB.UBCount(
+                days: _days.Count,
+                docs: _docs.Count,
+                avMask: (d, p) =>
+                {
+                    if (d < startDay) return AvMask.None;
+                    var code = _pref[d, p];
+                    // OD i brak dostępności nie wchodzą do matching'u
+                    return (code == PREF_NONE || code == PREF_OD) ? AvMask.None : AvMask.Any;
+                },
+                remCapPerDoc: p => Math.Max(0, _limitsByDoc[p] - curWork[p]),
+                dayAllowed: d => d >= startDay
+            );
         }
 
         // ===================== F2: Maksymalizacja obsady =====================

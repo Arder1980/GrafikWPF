@@ -1,5 +1,4 @@
-﻿// ----- FILE: GrafikWPF/ReservationSolverWrapper.cs -----
-#nullable enable
+﻿#nullable enable
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -8,8 +7,8 @@ using System.Threading;
 namespace GrafikWPF
 {
     /// <summary>
-    /// Wrapper: wycina dni z rezerwacjami, uruchamia solver na zredukowanym problemie,
-    /// scala wyniki i naprawia konflikty „dzień po dniu” bez BC — najpierw szukając zamiennika.
+    /// Wrapper: wycina rezerwacje, uruchamia solver na zredukowanym problemie,
+    /// scala wyniki i naprawia konflikty „dzień po dniu” bez BC — najpierw szuka zamiennika (deterministycznie).
     /// </summary>
     public class ReservationSolverWrapper : IGrafikSolver
     {
@@ -17,11 +16,8 @@ namespace GrafikWPF
         private readonly IGrafikSolver _wewnetrznySolver;
         private readonly CancellationToken _ct;
 
-        // Rezerwacje: dzień -> lekarz (stałe; nie modyfikujemy tych przydziałów)
-        private Dictionary<DateTime, Lekarz> _rezerwacje;
-
-        // Oryginalne limity (potrzebne przy podmianach)
-        private Dictionary<string, int> _limityOryginalne;
+        private Dictionary<DateTime, Lekarz> _rezerwacje = new();
+        private Dictionary<string, int> _limityOryginalne = new();
 
         public ReservationSolverWrapper(
             SolverType typSolvera,
@@ -63,7 +59,7 @@ namespace GrafikWPF
                 }
             }
 
-            // Walidacja: ten sam lekarz nie może mieć dwóch rezerwacji dzień-po-dniu
+            // Walidacja: dwie rezerwacje dzień-po-dniu tego samego lekarza
             foreach (var g in rezerwacje.GroupBy(k => k.Value.Symbol))
             {
                 var list = g.OrderBy(k => k.Key).Select(k => k.Key).ToList();
@@ -89,26 +85,19 @@ namespace GrafikWPF
 
         public RozwiazanyGrafik ZnajdzOptymalneRozwiazanie()
         {
-            // 1) Rozwiąż z wyciętymi rezerwacjami
             var partial = _wewnetrznySolver.ZnajdzOptymalneRozwiazanie();
 
-            // 2) Scal rezerwacje + wynik solv.
             var plan = new Dictionary<DateTime, Lekarz?>(
                 _rezerwacje.ToDictionary(k => k.Key, k => (Lekarz?)k.Value));
             foreach (var kv in partial.Przypisania) plan[kv.Key] = kv.Value;
 
-            // 3) Obciążenia (na pełnym planie po scaleniu)
             var oblozenie = _oryginalneDane.Lekarze.ToDictionary(l => l.Symbol, _ => 0);
             foreach (var l in plan.Values) if (l != null) oblozenie[l.Symbol]++;
 
-            // 4) Napraw konflikty d+1 – NAJPIERW: spróbuj znaleźć zamiennika (fallback: wyzeruj)
             NaprawDzienPoDniu_Z_Zamiennikiem(plan, oblozenie);
 
-            // 5) Metryki całości
             return EvaluationAndScoringService.CalculateMetrics(plan, oblozenie, _oryginalneDane);
         }
-
-        // ========================= NAPRAWA KONFLIKTÓW =========================
 
         private void NaprawDzienPoDniu_Z_Zamiennikiem(
             Dictionary<DateTime, Lekarz?> plan,
@@ -127,12 +116,10 @@ namespace GrafikWPF
                 if (a == null || b == null) continue;
                 if (a.Symbol != b.Symbol) continue;
 
-                // Dopuszczamy, jeśli którykolwiek to BC
                 bool bc1 = Av(d1, a.Symbol) == TypDostepnosci.BardzoChce;
                 bool bc2 = Av(d2, b.Symbol) == TypDostepnosci.BardzoChce;
                 if (bc1 || bc2) continue;
 
-                // Nie ruszamy rezerwacji – jeśli jedna strona to RZ, zmieniamy drugą
                 bool r1 = Av(d1, a.Symbol) == TypDostepnosci.Rezerwacja;
                 bool r2 = Av(d2, b.Symbol) == TypDostepnosci.Rezerwacja;
 
@@ -141,7 +128,6 @@ namespace GrafikWPF
 
                 if (r1 && r2)
                 {
-                    // Nie powinno się zdarzyć (walidowane wcześniej), zachowawczo pomiń
                     SolverDiagnostics.Log($"[WrapperRepair] UWAGA: dwie rezerwacje dzień-po-dniu dla {a.Symbol} ({Fmt(d1)} & {Fmt(d2)}). Pomijam.");
                     continue;
                 }
@@ -149,29 +135,24 @@ namespace GrafikWPF
                 else if (!r1 && r2) { dayToFix = d1; symToRemove = a.Symbol; }
                 else
                 {
-                    // Obie nie są rezerwacjami – zmieniamy „słabszą” deklarację; remis → d1
                     var s1 = Score(Av(d1, a.Symbol));
                     var s2 = Score(Av(d2, b.Symbol));
                     dayToFix = (s1 < s2) ? d1 : (s2 < s1 ? d2 : d1);
-                    symToRemove = a.Symbol; // to i tak ten sam symbol
+                    symToRemove = a.Symbol;
                 }
 
-                // SPRÓBUJ ZNALEŹĆ ZAMIENNIKA
                 var replacement = ZnajdzZastepce(plan, oblozenie, dayToFix, symToRemove);
 
                 if (replacement != null)
                 {
                     var old = plan[dayToFix]!;
                     plan[dayToFix] = replacement;
-
                     oblozenie[old.Symbol]--;
                     oblozenie[replacement.Symbol]++;
-
                     SolverDiagnostics.Log($"[WrapperRepair] Zamiana: {Fmt(dayToFix)} {old.Symbol} ➜ {replacement.Symbol} (naprawa d+1 bez BC).");
                 }
                 else
                 {
-                    // Brak kandydatów — fallback do wyzerowania
                     SolverDiagnostics.Log($"[WrapperRepair] Brak zamiennika dla {Fmt(dayToFix)} ({symToRemove}) – zeruję ten dzień.");
                     var old = plan[dayToFix]!;
                     oblozenie[old.Symbol]--;
@@ -189,8 +170,9 @@ namespace GrafikWPF
             var prev = dzien.AddDays(-1);
             var next = dzien.AddDays(1);
 
-            // Kandydaci: wszyscy oprócz aktualnie wpisanego
+            // KANDYDACI w kolejności deterministycznej
             var kandydaci = _oryginalneDane.Lekarze
+                .OrderBy(l => l.Nazwisko).ThenBy(l => l.Imie).ThenBy(l => l.Symbol)
                 .Where(l => l.Symbol != symbolDoWyczyszczenia)
                 .ToList();
 
@@ -219,21 +201,21 @@ namespace GrafikWPF
 
                 bool isBC = avHere == TypDostepnosci.BardzoChce;
 
-                // 4) Zakaz „d+1 bez BC” (względem sąsiadów już wpisanych w planie)
+                // 4) Zakaz „d+1 bez BC” (względem sąsiadów)
                 if (!isBC)
                 {
                     if (plan.TryGetValue(prev, out var p) && p != null && p.Symbol == sym) continue;
                     if (plan.TryGetValue(next, out var n) && n != null && n.Symbol == sym) continue;
                 }
 
-                // 5) „Inny dyżur ±1” dla nie-BC
+                // 5) „Inny dyżur ±1” (jeśli nie BC)
                 if (!isBC)
                 {
                     if (Av(prev, sym) == TypDostepnosci.DyzurInny) continue;
                     if (Av(next, sym) == TypDostepnosci.DyzurInny) continue;
                 }
 
-                // 6) Scoring kandydata – preferuj BC>CH>MG>MW, większy zapas limitu i większą odległość od własnych dyżurów
+                // 6) Scoring kandydata – BC>CH>MG>MW + zapas limitu + odległość
                 double score =
                     Score(avHere) * 1000.0
                     + (limit - oblozenie.GetValueOrDefault(sym, 0)) * 10.0
@@ -244,12 +226,18 @@ namespace GrafikWPF
                     bestScore = score;
                     best = k;
                 }
+                else if (Math.Abs(score - bestScore) < 1e-9 && best != null)
+                {
+                    // deterministyczny tie-break: najpierw po Symbol
+                    if (string.Compare(sym, best.Symbol, StringComparison.Ordinal) < 0)
+                        best = k;
+                }
             }
 
             return best;
         }
 
-        // ========================= POMOCNICZE =========================
+        // ====== Pomocnicze ======
 
         private TypDostepnosci Av(DateTime day, string sym)
         {
@@ -262,7 +250,7 @@ namespace GrafikWPF
             TypDostepnosci.BardzoChce => 3,
             TypDostepnosci.Chce => 2,
             TypDostepnosci.Moge => 1,
-            TypDostepnosci.MogeWarunkowo => 0,   // najniżej
+            TypDostepnosci.MogeWarunkowo => 0,
             _ => -100
         };
 

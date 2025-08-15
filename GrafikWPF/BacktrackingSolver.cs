@@ -1,11 +1,9 @@
 using System.Text;
 using System;
 using System.Collections.Generic;
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
-using System.Threading.Tasks;
 using GrafikWPF.Algorithms;
 
 namespace GrafikWPF
@@ -15,13 +13,12 @@ namespace GrafikWPF
     /// F1: maksymalizacja prefiksu (ciągłość od początku – jeśli to #1).
     /// F2: dogęszczanie reszty przy zachowaniu priorytetów.
     ///
-    /// Kroki wydajności:
-    ///  1) mikrosito d+1 (twardy forward-check) + pełny UB co N poziomów,
-    ///  2) buckety kandydatów + tańsze tie-breaki,
-    ///  3) cache UB (suffix + okno) i okienkowe UB co każdy poziom,
-    ///  4) throttling logów i mniej alokacji w F2,
-    ///  5) równoległość gałęzi startowych (fan-out na dniu 0),
-    ///  HEAVY) dynamiczne fan-out + wspólny cache UB + globalny early-out między wątkami.
+    /// Wydajnościowe kroki (deterministyczne):
+    ///  - mikrosito d+1 (twardy forward-check),
+    ///  - buckety kandydatów + tańsze tie-breaki,
+    ///  - cache UB (suffix + okno) i okienkowe UB co każdy poziom,
+    ///  - throttling logów i mniej alokacji w F2.
+    ///  Brak równoległości = pełna powtarzalność wyników.
     /// </summary>
     public sealed class BacktrackingSolver : IGrafikSolver
     {
@@ -49,12 +46,13 @@ namespace GrafikWPF
         private readonly int[] _limitsByDoc;
         private readonly byte[,] _pref; // [day, doc] -> PREF_*
 
-        // Stan globalny
-        private readonly int[] _assign;
-        private readonly int[] _workPerDoc;
+        // Stan rozwiązania
+        private readonly int[] _assign;     // day -> doc idx; EMPTY/UNASSIGNED
+        private readonly int[] _workPerDoc; // globalne obciążenia
         private readonly int[] _mwUsed;
         private int _filled;
 
+        // Najlepszy wynik / scoring
         private RozwiazanyGrafik? _best;
         private long[]? _bestScore;
 
@@ -62,45 +60,33 @@ namespace GrafikWPF
         private int _bestPrefixLen;
         private int[]? _bestPrefixAssign;
 
-        // === KROK 1: Pełny UB + mikrosito d+1 ===
+        // Pełny UB (dinic) – co ile poziomów
         private const bool F1_USE_FULL_UB = true;
         private const int F1_FULL_UB_EVERY = 8;
 
-        // === KROK 3: Okienkowy UB + cache UB (tryb sekwencyjny) ===
+        // Okienkowy UB i cache (deterministyczny, lokalny)
         private const int F1_WIN_SIZE = 10;
         private const int F1_WIN_UB_EVERY = 1;
         private readonly Dictionary<(int day, ulong capHash), int> _ubCache = new(1024);
         private readonly Dictionary<(int start, int end, ulong capHash), int> _winUbCache = new(2048);
 
-        // === KROK 2: Buckety kandydatów per dzień ===
+        // Buckety kandydatów per dzień
         private List<int>[] _buckBC;
         private List<int>[] _buckCH;
         private List<int>[] _buckMG;
         private List<int>[] _buckMW;
         private bool _bucketsReady;
 
-        // === KROK 4: throttling logów F1 ===
+        // Throttling logów F1
         private const int LOG_EVERY_PRUNE_D1 = 100; // 0 = loguj każdy
         private const int LOG_EVERY_WINUB = 10;  // 0 = loguj każdy
 
-        // === KROK 4: bufor współdzielony dla F2 (mniej alokacji) ===
+        // Bufor współdzielony dla F2
         private readonly List<int> _tmp = new(64);
 
         // Polityki
         private readonly bool _bcBreaksAdjacent = true;
         private readonly int _mwMax = 1;
-
-        // === KROK 5: równoległość na starcie ===
-        private const bool F1_PARALLEL_FANOUT_ENABLED = true;
-        private static readonly int F1_PAR_BRANCHES_BASE = Math.Max(2, Math.Min(4, Environment.ProcessorCount));
-
-        // === HEAVY: włącznik, limity i współdzielone cache UB ===
-        private const bool HEAVY_PROFILE = true;
-        private static readonly int F1_PAR_BRANCHES_CAP = Math.Min(8, 2 * Environment.ProcessorCount);
-        private readonly ConcurrentDictionary<(int day, ulong capHash), int> _ubCacheShared
-                    = new ConcurrentDictionary<(int day, ulong capHash), int>(Environment.ProcessorCount, 16384);
-        private readonly ConcurrentDictionary<(int start, int end, ulong capHash), int> _winUbCacheShared
-                    = new ConcurrentDictionary<(int start, int end, ulong capHash), int>(Environment.ProcessorCount, 32768);
 
         public BacktrackingSolver(GrafikWejsciowy input,
                                   IReadOnlyList<SolverPriority> priorities,
@@ -113,7 +99,7 @@ namespace GrafikWPF
             _token = token;
 
             _days = _input.Dostepnosc.Keys.OrderBy(d => d).ToList();
-            _docs = _input.Lekarze.OrderBy(l => l.Nazwisko).ThenBy(l => l.Imie).ToList();
+            _docs = _input.Lekarze.OrderBy(l => l.Nazwisko).ThenBy(l => l.Imie).ThenBy(l => l.Symbol).ToList();
 
             _docIdxBySymbol = new Dictionary<string, int>(_docs.Count);
             for (int i = 0; i < _docs.Count; i++) _docIdxBySymbol[_docs[i].Symbol] = i;
@@ -141,10 +127,12 @@ namespace GrafikWPF
         // ===================== API =====================
         public RozwiazanyGrafik ZnajdzOptymalneRozwiazanie()
         {
-            SolverDiagnostics.Start("BacktrackingSolver");
+            SolverDiagnostics.Start("BacktrackingSolver.Det");
 
+            // F1 – ciągłość od początku (sekwencyjnie)
             F1_MaximizePrefix();
 
+            // Odtwórz najlepszy prefiks i przejdź do F2
             if (_bestPrefixAssign != null)
             {
                 ApplyPrefixSnapshot(_bestPrefixAssign, _bestPrefixLen);
@@ -194,9 +182,7 @@ namespace GrafikWPF
             }
         }
 
-        // ===================== F1: Maksymalizacja prefiksu =====================
-
-        // Pełny upper bound (ogon d..end) – sekwencyjny cache
+        // ===================== F1: Maksymalizacja prefiksu (SEKWENCYJNIE) =====================
         private int F1_SuffixUpperBoundCached(int startDay, int[] curWork)
         {
             var key = (startDay, HashRemCap(curWork));
@@ -218,7 +204,6 @@ namespace GrafikWPF
             return ub;
         }
 
-        // Okienkowy upper bound [start..end] – sekwencyjny cache
         private int F1_WindowUpperBoundCached(int startDay, int endDay, int[] curWork)
         {
             if (endDay < startDay) return 0;
@@ -241,51 +226,6 @@ namespace GrafikWPF
             return ub;
         }
 
-        // === HEAVY: wspólne cache UB dla wątków ===
-        private int SuffixUBCachedShared(int startDay, int[] curWork)
-        {
-            var key = (startDay, HashRemCap(curWork));
-            if (_ubCacheShared.TryGetValue(key, out var ub)) return ub;
-
-            ub = FlowUB.UBCount(
-                days: _days.Count,
-                docs: _docs.Count,
-                avMask: (d, p) =>
-                {
-                    if (d < startDay) return AvMask.None;
-                    var code = _pref[d, p];
-                    return (code == PREF_NONE || code == PREF_OD) ? AvMask.None : AvMask.Any;
-                },
-                remCapPerDoc: p => Math.Max(0, _limitsByDoc[p] - curWork[p]),
-                dayAllowed: d => d >= startDay
-            );
-            _ubCacheShared.TryAdd(key, ub);
-            return ub;
-        }
-
-        private int WindowUBCachedShared(int startDay, int endDay, int[] curWork)
-        {
-            if (endDay < startDay) return 0;
-            var key = (startDay, endDay, HashRemCap(curWork));
-            if (_winUbCacheShared.TryGetValue(key, out var ub)) return ub;
-
-            ub = FlowUB.UBCount(
-                days: _days.Count,
-                docs: _docs.Count,
-                avMask: (d, p) =>
-                {
-                    if (d < startDay || d > endDay) return AvMask.None;
-                    var code = _pref[d, p];
-                    return (code == PREF_NONE || code == PREF_OD) ? AvMask.None : AvMask.Any;
-                },
-                remCapPerDoc: p => Math.Max(0, _limitsByDoc[p] - curWork[p]),
-                dayAllowed: d => d >= startDay && d <= endDay
-            );
-            _winUbCacheShared.TryAdd(key, ub);
-            return ub;
-        }
-
-        // Hash rozkładu "pozostałych pojemności"
         private ulong HashRemCap(int[] curWork)
         {
             ulong h = 1469598103934665603ul; // FNV-1a 64
@@ -301,177 +241,15 @@ namespace GrafikWPF
 
         private void F1_MaximizePrefix()
         {
-            var rootAssign = new int[_days.Count]; Array.Fill(rootAssign, UNASSIGNED);
-            var rootWork = new int[_docs.Count];
-            var rootMW = new int[_docs.Count];
-
-            EnsureBucketsBuilt();
-            var rootCands = F1_OrderCandidates(0, rootAssign, rootWork, rootMW);
-
-            // ===== Tryb równoległy =====
-            if (F1_PARALLEL_FANOUT_ENABLED && rootCands.Count > 1)
-            {
-                // Dynamiczne k (HEAVY): ogranicz fan-out według CPU, sufiksowego/okienkowego UB
-                int cpu = Environment.ProcessorCount;
-                int kCpu = Math.Min(F1_PAR_BRANCHES_CAP, 2 * cpu);
-                int kBase = Math.Min(F1_PAR_BRANCHES_BASE, rootCands.Count);
-
-                int k = Math.Min(rootCands.Count, Math.Min(kCpu, Math.Max(kBase, 2)));
-
-                if (HEAVY_PROFILE)
-                {
-                    // Okno od 0
-                    int w0 = WindowUBCachedShared(0, Math.Min(F1_WIN_SIZE - 1, _days.Count - 1), rootWork);
-                    // Ogranicz do wub0+1 (jak okno ciasne, nie ma sensu mnożyć gałęzi)
-                    k = Math.Min(k, Math.Max(2, w0 + 1));
-                }
-
-                // Wspólny stan prefiksu i CTS do wczesnego przerwania
-                int sharedBest = 0;
-                int[]? sharedBestSnap = null;
-                var gate = new object();
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(_token);
-                var tk = cts.Token;
-
-                // Gałęzie
-                var tasks = new List<Task>(k);
-                for (int bi = 0; bi < k; bi++)
-                {
-                    var firstDoc = rootCands[bi];
-
-                    tasks.Add(Task.Run(() =>
-                    {
-                        var curAssign = new int[_days.Count]; Array.Fill(curAssign, UNASSIGNED);
-                        var curWork = new int[_docs.Count];
-                        var curMW = new int[_docs.Count];
-
-                        int localBest = 0;
-                        int[]? localBestSnap = null;
-                        int cntPrune = 0, cntWin = 0;
-
-                        void UpdateBest(int day)
-                        {
-                            if (day <= localBest) return;
-                            localBest = day;
-                            localBestSnap = new int[day];
-                            Array.Copy(curAssign, localBestSnap, day);
-
-                            lock (gate)
-                            {
-                                if (localBest > sharedBest)
-                                {
-                                    sharedBest = localBest;
-                                    sharedBestSnap = (int[])localBestSnap.Clone();
-                                    if (sharedBest >= _days.Count)
-                                    {
-                                        // pełna ciągłość — kończymy wszystkie gałęzie
-                                        cts.Cancel();
-                                    }
-                                }
-                            }
-                        }
-
-                        void DFS(int day)
-                        {
-                            if (tk.IsCancellationRequested) return;
-                            _progress?.Report(day / (double)_days.Count);
-
-                            // Wspólne odcięcia na UB (cache współdzielony)
-                            if (F1_WIN_UB_EVERY > 0 && (day % F1_WIN_UB_EVERY == 0))
-                            {
-                                int W = Math.Min(F1_WIN_SIZE, _days.Count - day);
-                                int end = day + W - 1;
-                                int wub = WindowUBCachedShared(day, end, curWork);
-                                int bestNow;
-                                lock (gate) bestNow = sharedBest;
-                                if (bestNow >= day + wub)
-                                {
-                                    if (LOG_EVERY_WINUB == 0 || (++cntWin % LOG_EVERY_WINUB == 0))
-                                        SolverDiagnostics.Log($"[F1][WIN-UB-cut] {FormatDay(day)}..{FormatDay(Math.Max(day, end))}: wub={wub}, bestPref={bestNow} → stop");
-                                    return;
-                                }
-                            }
-                            if (F1_USE_FULL_UB && (day % F1_FULL_UB_EVERY == 0))
-                            {
-                                int ub = SuffixUBCachedShared(day, curWork);
-                                int bestNow;
-                                lock (gate) bestNow = sharedBest;
-                                if (day + ub <= bestNow)
-                                {
-                                    SolverDiagnostics.Log($"[F1][FULL-UB-cut] od {FormatDay(day)}: ub={ub}, bestPref={bestNow} → stop");
-                                    return;
-                                }
-                            }
-
-                            // Aktualizacja wspólnego best (na wypadek cichego postępu)
-                            UpdateBest(day);
-                            if (day >= _days.Count) return;
-
-                            var cands = F1_OrderCandidates(day, curAssign, curWork, curMW);
-                            if (cands.Count == 0) return;
-
-                            foreach (var doc in cands)
-                            {
-                                if (tk.IsCancellationRequested) return;
-
-                                byte code = _pref[day, doc];
-                                if (!F1_IsFeasible(day, doc, curAssign, curWork, curMW)) continue;
-
-                                // mikrosito d+1
-                                if (!KeepsNextFeasible(day, doc, curAssign, curWork, curMW))
-                                {
-                                    if (LOG_EVERY_PRUNE_D1 == 0 || (++cntPrune % LOG_EVERY_PRUNE_D1 == 0))
-                                        SolverDiagnostics.Log($"[F1] Prune d+1: {FormatDay(day)} ← {_docs[doc].Symbol}");
-                                    continue;
-                                }
-
-                                // pick
-                                curAssign[day] = doc;
-                                curWork[doc]++;
-                                if (code == PREF_MW) curMW[doc]++;
-
-                                DFS(day + 1);
-
-                                // backtrack
-                                if (code == PREF_MW) curMW[doc]--;
-                                curWork[doc]--;
-                                curAssign[day] = UNASSIGNED;
-                            }
-                        }
-
-                        // Start gałęzi: wymuś wybór firstDoc na dniu 0
-                        if (!tk.IsCancellationRequested &&
-                            F1_IsFeasible(0, firstDoc, curAssign, curWork, curMW) &&
-                            KeepsNextFeasible(0, firstDoc, curAssign, curWork, curMW))
-                        {
-                            byte c0 = _pref[0, firstDoc];
-                            curAssign[0] = firstDoc;
-                            curWork[firstDoc]++;
-                            if (c0 == PREF_MW) curMW[firstDoc]++;
-
-                            UpdateBest(1);
-                            DFS(1);
-                        }
-                    }, tk));
-                }
-
-                try { Task.WaitAll(tasks.ToArray(), tk); }
-                catch (OperationCanceledException) { /* normalne w early-out */ }
-
-                // Zapisz najlepszy prefiks z gałęzi
-                _bestPrefixLen = sharedBest;
-                _bestPrefixAssign = sharedBestSnap;
-                return;
-            }
-
-            // ===== Tryb sekwencyjny =====
             var curA = new int[_days.Count]; Array.Fill(curA, UNASSIGNED);
             var curW = new int[_docs.Count];
             var curM = new int[_docs.Count];
 
-            int cntPruneSeq = 0, cntWinSeq = 0;
+            EnsureBucketsBuilt();
 
-            void DFS_SEQ(int day)
+            int cntPrune = 0, cntWin = 0;
+
+            void DFS(int day)
             {
                 _token.ThrowIfCancellationRequested();
                 _progress?.Report(day / (double)_days.Count);
@@ -485,6 +263,7 @@ namespace GrafikWPF
                 }
                 if (day >= _days.Count) return;
 
+                // Okienkowe UB
                 if (F1_WIN_UB_EVERY > 0 && (day % F1_WIN_UB_EVERY == 0))
                 {
                     int W = Math.Min(F1_WIN_SIZE, _days.Count - day);
@@ -492,12 +271,13 @@ namespace GrafikWPF
                     int wub = F1_WindowUpperBoundCached(day, end, curW);
                     if (_bestPrefixLen >= day + wub)
                     {
-                        if (LOG_EVERY_WINUB == 0 || (++cntWinSeq % LOG_EVERY_WINUB == 0))
+                        if (LOG_EVERY_WINUB == 0 || (++cntWin % LOG_EVERY_WINUB == 0))
                             SolverDiagnostics.Log($"[F1][WIN-UB-cut] {FormatDay(day)}..{FormatDay(Math.Max(day, end))}: wub={wub}, bestPref={_bestPrefixLen} → stop");
                         return;
                     }
                 }
 
+                // Pełny UB
                 if (F1_USE_FULL_UB && (day % F1_FULL_UB_EVERY == 0))
                 {
                     int ub = F1_SuffixUpperBoundCached(day, curW);
@@ -516,9 +296,10 @@ namespace GrafikWPF
                     byte code = _pref[day, doc];
                     if (!F1_IsFeasible(day, doc, curA, curW, curM)) continue;
 
+                    // mikrosito d+1 – ślepe zaułki odcinamy twardo
                     if (!KeepsNextFeasible(day, doc, curA, curW, curM))
                     {
-                        if (LOG_EVERY_PRUNE_D1 == 0 || (++cntPruneSeq % LOG_EVERY_PRUNE_D1 == 0))
+                        if (LOG_EVERY_PRUNE_D1 == 0 || (++cntPrune % LOG_EVERY_PRUNE_D1 == 0))
                             SolverDiagnostics.Log($"[F1] Prune d+1: {FormatDay(day)} ← {_docs[doc].Symbol}");
                         continue;
                     }
@@ -528,7 +309,7 @@ namespace GrafikWPF
                     curW[doc]++;
                     if (code == PREF_MW) curM[doc]++;
 
-                    DFS_SEQ(day + 1);
+                    DFS(day + 1);
 
                     // backtrack
                     if (code == PREF_MW) curM[doc]--;
@@ -537,10 +318,10 @@ namespace GrafikWPF
                 }
             }
 
-            DFS_SEQ(0);
+            DFS(0);
         }
 
-        // === KROK 2: Buckety kandydatów per dzień ===
+        // === Buckety kandydatów per dzień ===
         private void EnsureBucketsBuilt()
         {
             if (_bucketsReady) return;
@@ -584,10 +365,13 @@ namespace GrafikWPF
 
         private List<int> F1_OrderCandidates(int day, int[] curAssign, int[] curWork, int[] curMW)
         {
-            // Rezerwacje (raczej nieobecne po wrapperze)
+            // Rezerwacje – jeżeli jakieś jednak są w danych F1
             var RZ = new List<int>();
             for (int p = 0; p < _docs.Count; p++)
-                if (_pref[day, p] == PREF_RZ && F1_IsFeasible(day, p, curAssign, curWork, curMW)) RZ.Add(p);
+            {
+                if (_pref[day, p] == PREF_RZ && F1_IsFeasible(day, p, curAssign, curWork, curMW))
+                    RZ.Add(p);
+            }
             if (RZ.Count > 0)
             {
                 RZ.Sort((a, b) => TieBreakF1(day, a, b, curAssign, curWork));
@@ -595,6 +379,7 @@ namespace GrafikWPF
                 return RZ;
             }
 
+            // Buckety BC→CH→MG→MW
             var baseList = new List<int>(
                 (_buckBC[day]?.Count ?? 0) +
                 (_buckCH[day]?.Count ?? 0) +
@@ -608,12 +393,18 @@ namespace GrafikWPF
 
             // Limit
             for (int i = baseList.Count - 1; i >= 0; i--)
-                if (curWork[baseList[i]] >= _limitsByDoc[baseList[i]]) baseList.RemoveAt(i);
+            {
+                int p = baseList[i];
+                if (curWork[p] >= _limitsByDoc[p]) baseList.RemoveAt(i);
+            }
 
             // Twarda wykonalność
             var cands = new List<int>(baseList.Count);
             foreach (var doc in baseList)
-                if (F1_IsFeasible(day, doc, curAssign, curWork, curMW)) cands.Add(doc);
+            {
+                if (F1_IsFeasible(day, doc, curAssign, curWork, curMW))
+                    cands.Add(doc);
+            }
 
             if (cands.Count <= 1) return cands;
 
@@ -634,15 +425,19 @@ namespace GrafikWPF
                 int wb = PrefWeight(_pref[day, b]);
                 if (wa != wb) return wa - wb;
 
-                int la = _limitsByDoc[a], lb = _limitsByDoc[b];
-                int wna = curWork[a] + 1, wnb = curWork[b] + 1;
+                int la = _limitsByDoc[a];
+                int lb = _limitsByDoc[b];
+                int wna = curWork[a] + 1;
+                int wnb = curWork[b] + 1;
                 long left = (long)wna * lb;
                 long right = (long)wnb * la;
                 if (left != right) return left < right ? -1 : 1;
 
-                int da = NearestCached(a), db = NearestCached(b);
+                int da = NearestCached(a);
+                int db = NearestCached(b);
                 if (da != db) return db - da;
 
+                // stabilizator deterministyczny
                 return a - b;
             });
 
@@ -675,6 +470,7 @@ namespace GrafikWPF
 
             bool isBC = (av == PREF_BC);
 
+            // sąsiedztwo: BC może łamać
             if (!_bcBreaksAdjacent || !isBC)
             {
                 if (day > 0 && curAssign[day - 1] == doc) return false;
@@ -724,7 +520,7 @@ namespace GrafikWPF
                 }
             }
 
-            // RZ (na wszelki)
+            // Rezerwacje (gdyby jakieś przeszły)
             for (int d = startDay; d < _days.Count; d++)
             {
                 if (_assign[d] != UNASSIGNED) continue;
@@ -828,10 +624,10 @@ namespace GrafikWPF
                             }
                         case SolverPriority.CiagloscPoczatkowa:
                         case SolverPriority.LacznaLiczbaObsadzonychDni:
-                            break; // w F2 i tak maksymalizujemy pokrycie, a prefiksu nie ruszamy
+                            break;
                     }
                 }
-                return a.CompareTo(b);
+                return a.CompareTo(b); // stabilizator
             });
             return candidates[0];
         }
@@ -920,7 +716,6 @@ namespace GrafikWPF
             {
                 if (sol.Przypisania.TryGetValue(_days[d], out var l) && l is not null)
                 {
-                    var i = _docIdxBySymbol[l.Symbol];
                     int prev = int.MaxValue, next = int.MaxValue;
                     for (int k = d - 1; k >= 0; k--) if (sol.Przypisania[_days[k]]?.Symbol == l.Symbol) { prev = d - k; break; }
                     for (int k = d + 1; k < _days.Count; k++) if (sol.Przypisania[_days[k]]?.Symbol == l.Symbol) { next = k - d; break; }
@@ -1018,6 +813,14 @@ namespace GrafikWPF
                 if (cur[i] < best[i]) return false;
             }
             return false;
+        }
+
+        private void LogCandidates(int day, List<int> cand, int[] curAssign, int[] curWork)
+        {
+            SolverDiagnostics.Log($"--- [F1] Kandydaci dnia {FormatDay(day)} ---");
+            foreach (var p in cand)
+                SolverDiagnostics.Log($"  ✓ {_docs[p].Symbol} [{PrefToString(_pref[day, p])}]  (pracuje={curWork[p]}, limit={_limitsByDoc[p]})");
+            SolverDiagnostics.Log($"--- /[F1] Kandydaci dnia {FormatDay(day)} ---");
         }
     }
 }

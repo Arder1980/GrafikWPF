@@ -8,45 +8,41 @@ using System.Threading;
 namespace GrafikWPF
 {
     /// <summary>
-    /// Backtracking z priorytetem ciągłości (gdy wybrany przez użytkownika).
-    /// - Rolling horizon (K<=7) egzekwowany twardo na froncie ciągłości,
-    /// - CRP: wybór kandydata maksymalizującego gwarantowany prefiks w oknie,
-    /// - (WYŁĄCZONE w ETAP 1) rezerwowanie CH/BC w przyszłość,
-    /// - Adaptacyjna lokalna naprawa pierwszej dziury (cofka 5–7),
-    /// - MW = 1 na osobę,
-    /// - Reguły sąsiedztwa: BC może łamać „dzień-po-dniu” i „Inny dyżur ±1”; MG/CH/MW nie mogą.
+    /// Backtracking z dynamicznymi politykami:
+    /// - CHProtect (ochrona CH/BC) sterowana przełącznikiem,
+    /// - BC_breaks_adjacent: czy BC może łamać zakaz d±1 i blokadę „Inny dyżur ±1”,
+    /// - MW_max: maks. liczba dni „Mogę warunkowo” na lekarza,
+    /// - Rolling Horizon (RH_K: min..max) i CRP na froncie prefiksu,
+    /// - Lokalna naprawa (zakres cofki i okno do przodu),
+    /// - Twarde zasady: Rezerwacje > reszta; „OD” (Dyżur inny) w samym dniu jest niewykonalny.
     /// </summary>
     public sealed class BacktrackingSolver : IGrafikSolver
     {
-        // Kody preferencji (twarda dostępność):
-        private const byte PREF_NONE = 0; // brak / niedostępny
-        private const byte PREF_MW = 1; // Mogę warunkowo (max 1 w miesiącu)
+        // Kody preferencji (twarda dostępność)
+        private const byte PREF_NONE = 0;
+        private const byte PREF_MW = 1; // Mogę warunkowo
         private const byte PREF_MG = 2; // Mogę
         private const byte PREF_CH = 3; // Chcę
         private const byte PREF_BC = 4; // Bardzo chcę
         private const byte PREF_RZ = 5; // Rezerwacja (musi być)
-        private const byte PREF_OD = 6; // Dyżur (inny) – dzień +/-1 (dla MG/CH/MW działa blokada)
+        private const byte PREF_OD = 6; // Dyżur (inny) – dzień jest wykluczony do obsady
 
-        // Stałe wyszukiwania
         private const int UNASSIGNED = int.MinValue;
         private const int EMPTY = -1;
 
-        // Rolling horizon / CRP
-        private const int RH_MIN_K = 2;
-        private const int RH_MAX_K = 7; // okno przodu dla prefiksu
-
-        // (Pozostawione dla ewentualnego późniejszego użycia w ETAP 5; aktualnie nieużywane)
-        private const int CH_PROTECT_K = 7; // okno dla balansu U(c)/R(c) – TERAZ WYŁĄCZONE
-
-        // LocalRepair
-        private const int LR_MIN_BACK = 5;
-        private const int LR_MAX_BACK = 7;
-        private const int LR_FWD = 4;
-
-        // Pomocnicze
+        // ====== Polityki (prawdziwe przełączniki / parametry) ======
+        private readonly bool _chProtectEnabled;        // ON/OFF
+        private readonly bool _bcBreaksAdjacent;        // czy BC może łamać d±1 i OD±1
+        private readonly int _mwMax;                   // maks. MW/osoba
+        private readonly int _rhMinK;                  // min okna rolling
+        private readonly int _rhMaxK;                  // max okna rolling (i CRP)
+        private readonly int _chProtectK;              // horyzont patrzenia dla CHProtect
+        private readonly int _lrBackMin;               // lokalna naprawa – cofka min
+        private readonly int _lrBackMax;               // lokalna naprawa – cofka max
+        private readonly int _lrFwd;                   // lokalna naprawa – okno do przodu
         private const int UNIT_PROP_LIMIT = 2;
 
-        // Dane wejściowe / kontekst
+        // Dane wejściowe
         private readonly GrafikWejsciowy _input;
         private readonly IReadOnlyList<SolverPriority> _priorities;
         private readonly IProgress<double>? _progress;
@@ -58,14 +54,11 @@ namespace GrafikWPF
         private readonly Dictionary<DateTime, Dictionary<string, TypDostepnosci>> _av;
         private readonly int[] _limitsByDoc;
 
-        // Prekomputacja dostępności
-        private readonly byte[,] _pref; // [day, doc] -> PREF_*
-
-        // Stan bieżący
-        private readonly int[] _assign; // day -> doc idx; EMPTY/UNASSIGNED
-        private readonly int[] _work;   // ile przydzielono lekarzowi
-        private readonly int[] _mwUsed; // ile MW wykorzystał lekarz
-        private int _assignedFilled;     // ile dni obsadzonych
+        private readonly byte[,] _pref;   // [day,doc] -> PREF_*
+        private readonly int[] _assign;   // day -> doc idx; EMPTY/UNASSIGNED
+        private readonly int[] _work;     // przydziały na lekarza
+        private readonly int[] _mwUsed;   // MW użyte na lekarza
+        private int _assignedFilled;
 
         // Prefiks (ciągłość od początku)
         private bool _isPrefixActive;
@@ -90,8 +83,7 @@ namespace GrafikWPF
             _docs = _input.Lekarze.OrderBy(l => l.Nazwisko).ThenBy(l => l.Imie).ToList();
 
             _docIdxBySymbol = new Dictionary<string, int>(_docs.Count);
-            for (int i = 0; i < _docs.Count; i++)
-                _docIdxBySymbol[_docs[i].Symbol] = i;
+            for (int i = 0; i < _docs.Count; i++) _docIdxBySymbol[_docs[i].Symbol] = i;
 
             _av = _input.Dostepnosc;
 
@@ -108,9 +100,21 @@ namespace GrafikWPF
             _assign = Enumerable.Repeat(UNASSIGNED, _days.Count).ToArray();
             _work = new int[_docs.Count];
             _mwUsed = new int[_docs.Count];
-            _assignedFilled = 0;
 
+            _assignedFilled = 0;
             _isPrefixActive = true;
+
+            // ====== Wartości polityk (na teraz – stałe sensowne wartości) ======
+            // Docelowo można to zasilać z ustawień UI / SchedulingRules.
+            _chProtectEnabled = false;  // wyłączone – zgodnie z ustaleniami
+            _bcBreaksAdjacent = true;   // BC może łamać d±1 i „OD ±1”
+            _mwMax = 1;      // MW: maks. 1 na osobę
+            _rhMinK = 2;      // Rolling/CRP: K 2..7
+            _rhMaxK = 7;
+            _chProtectK = 7;      // horyzont dla bilansu CH/BC (gdy ON)
+            _lrBackMin = 5;      // LocalRepair: cofka 5..7, fwd=4
+            _lrBackMax = 7;
+            _lrFwd = 4;
         }
 
         // ====== Prekomputacja ======
@@ -123,7 +127,7 @@ namespace GrafikWPF
                 {
                     var sym = _docs[p].Symbol;
                     var td = (_av.TryGetValue(date, out var map) && map.TryGetValue(sym, out var t))
-                        ? t : TypDostepnosci.Niedostepny;
+                             ? t : TypDostepnosci.Niedostepny;
 
                     _pref[d, p] = td switch
                     {
@@ -146,37 +150,24 @@ namespace GrafikWPF
             SolverDiagnostics.Log($"Dni: {_days.Count}, lekarze: {_docs.Count}");
             SolverDiagnostics.Log($"Priorytety: {string.Join(", ", _priorities)}");
 
-            // === ETAP 0: Nagłówek statusu polityk (tylko log, zero zmian logiki) ===
+            // Nagłówek polityk spójny z faktycznym działaniem
             try
             {
-                const string solverName = "Backtracking";
-                IReadOnlyList<SolverPriority> pri =
-                    _priorities ?? DataManager.AppData.KolejnoscPriorytetowSolvera;
-
-                bool chProtectEnabled = false; // WYŁĄCZONE
-                bool bcBreaksAdjacent = true;  // BC może łamać ±1
-                int mwMax = 1;     // maks. 1 MW na osobę
-
-                var rhK = (min: RH_MIN_K, max: RH_MAX_K);
-                var lrBack = (min: LR_MIN_BACK, max: LR_MAX_BACK);
-                var lrFwd = (min: LR_FWD, max: LR_FWD);
-
                 SolverPolicyStatus.LogStartupHeader(
-                    solverName: solverName,
-                    priorities: pri,
-                    chProtectEnabled: chProtectEnabled,
-                    bcBreaksAdjacent: bcBreaksAdjacent,
-                    mwMax: mwMax,
-                    rhK: rhK,
-                    lrBack: lrBack,
-                    lrFwd: lrFwd
+                    solverName: "Backtracking",
+                    priorities: _priorities ?? Array.Empty<SolverPriority>(),
+                    chProtectEnabled: _chProtectEnabled,
+                    bcBreaksAdjacent: _bcBreaksAdjacent,
+                    mwMax: _mwMax,
+                    rhK: (_rhMinK, _rhMaxK),
+                    lrBack: (_lrBackMin, _lrBackMax),
+                    lrFwd: (_lrFwd, _lrFwd)
                 );
             }
             catch (Exception ex)
             {
                 SolverDiagnostics.Log("[Policy] Header logging failed: " + ex.Message);
             }
-            // === /ETAP 0 ===
 
             LogLimits();
             LogLegendAndAvailability();
@@ -193,23 +184,6 @@ namespace GrafikWPF
                     dict[_days[d]] = _assign[d] >= 0 ? _docs[_assign[d]] : null;
                 _best = new RozwiazanyGrafik { Przypisania = dict };
             }
-
-            // Podsumowanie polityk po biegu (diagnostyka)
-            try
-            {
-                int total = _days.Count;
-                int filled = _best.Przypisania.Count(kv => kv.Value != null);
-                int prefix = 0;
-                for (int i = 0; i < _days.Count; i++)
-                {
-                    if (!_best.Przypisania.TryGetValue(_days[i], out var l) || l is null) break;
-                    prefix++;
-                }
-                int empty = total - filled;
-                SolverPolicyStatus.LogPostRunSummary("Backtracking", total, filled, prefix, empty);
-            }
-            catch { /* no-op */ }
-
             return _best!;
         }
 
@@ -228,16 +202,23 @@ namespace GrafikWPF
 
             var candidates = OrderCandidates(day);
 
-            // Rolling-horizon + CRP tylko na froncie prefiksu (gdy ciągłość to priorytet #1)
             bool continuityFirst = _priorities.Count > 0 && _priorities[0] == SolverPriority.CiagloscPoczatkowa;
             bool atPrefixFront = _isPrefixActive && day == PrefixLength();
 
             if (continuityFirst && atPrefixFront && candidates.Count > 0)
             {
-                // (ETAP 1) BRAK twardej ochrony CH/BC – nie wzywamy FilterByCoverBalance
+                // CHProtect – tylko jeśli włączone
+                if (_chProtectEnabled)
+                {
+                    candidates = FilterByCoverBalance(day, candidates, _chProtectK);
+                }
+                else
+                {
+                    SolverDiagnostics.Log("[CHProtect] OFF – pomijam filtrację na froncie prefiksu.");
+                }
 
-                // Rolling horizon: wymagaj wykonalności okna
-                var filtered = FilterByRollingFeasibility(day, candidates);
+                // Rolling horizon (wymagalne) + CRP
+                var filtered = FilterByRollingFeasibility(day, candidates, _rhMinK, _rhMaxK);
                 if (filtered.Count == 0)
                 {
                     SolverDiagnostics.Log($"[RH] 0 kandydatów po filtrze okna – {FormatDay(day)} → wymuszone PUSTO i LocalRepair.");
@@ -245,14 +226,27 @@ namespace GrafikWPF
                     return;
                 }
 
-                // CRP: wybierz kandydata, który maksymalizuje gwarantowany prefiks
-                candidates = OrderByCRP(day, filtered, RH_MAX_K);
+                candidates = OrderByCRP(day, filtered, _rhMaxK);
             }
             else
             {
-                // Po prefiksie: brak kar za „przyszłe CH/BC” – czyste dynamiczne priorytety
+                // Po prefiksie: bez twardego CHProtect (gdy OFF) – jedynie miękkie priorytety użytkownika
                 if (candidates.Count > 1)
-                    candidates.Sort((a, b) => CompareCandidates(day, a, b));
+                {
+                    candidates.Sort((a, b) =>
+                    {
+                        int cmp;
+                        if (_chProtectEnabled)
+                        {
+                            int pa = FutureCHPenalty(day, a, _chProtectK);
+                            int pb = FutureCHPenalty(day, b, _chProtectK);
+                            cmp = pa.CompareTo(pb);
+                            if (cmp != 0) return cmp;
+                        }
+                        // dalej standardowe porównanie wg priorytetów i preferencji
+                        return CompareCandidates(day, a, b);
+                    });
+                }
             }
 
             if (candidates.Count == 0)
@@ -300,11 +294,11 @@ namespace GrafikWPF
             }
 
             PlaceEmpty(day);
-            Search(0 + 1);
+            Search(1);
             UnplaceEmpty(day);
         }
 
-        // ====== Wybór kolejnej zmiennej (MRV po prefiksie) ======
+        // ====== Wybór zmiennej ======
         private int NextDayToBranch()
         {
             if (_isPrefixActive)
@@ -314,8 +308,8 @@ namespace GrafikWPF
                 return -1;
             }
 
+            // MRV
             int bestDay = -1, bestCnt = int.MaxValue;
-
             for (int d = 0; d < _days.Count; d++)
             {
                 if (_assign[d] != UNASSIGNED) continue;
@@ -339,7 +333,7 @@ namespace GrafikWPF
             return bestDay;
         }
 
-        // ====== Branch&Bound – górne oszacowanie ======
+        // ====== Bound ======
         private bool BoundAllowsImprovement(int firstUnassignedDay)
         {
             if (_bestScore == null) return true;
@@ -357,9 +351,9 @@ namespace GrafikWPF
             var map = new Dictionary<SolverPriority, long>
             {
                 { SolverPriority.LacznaLiczbaObsadzonychDni, obsBound },
-                { SolverPriority.CiagloscPoczatkowa,         contBound },
-                { SolverPriority.SprawiedliwoscObciazenia,   fairBound },
-                { SolverPriority.RownomiernoscRozlozenia,     evenBound }
+                { SolverPriority.CiagloscPoczatkowa       , contBound },
+                { SolverPriority.SprawiedliwoscObciazenia , fairBound },
+                { SolverPriority.RownomiernoscRozlozenia  , evenBound }
             };
 
             var vec = new long[_priorities.Count];
@@ -380,12 +374,29 @@ namespace GrafikWPF
             return len;
         }
 
-        // ====== Rolling horizon / CRP ======
-
-        // (B) Rolling-horizon – wymagaj wykonalności okna
-        private List<int> FilterByRollingFeasibility(int day, List<int> cand)
+        // ====== Rolling / CHProtect / CRP ======
+        private List<int> FilterByCoverBalance(int day, List<int> candidates, int k)
         {
-            for (int K = RH_MIN_K; K <= RH_MAX_K; K++)
+            int end = Math.Min(_days.Count - 1, day + k);
+            var ok = new List<int>(candidates.Count);
+
+            foreach (var p in candidates)
+            {
+                var codeToday = _pref[day, p];
+                int U = UniqueCHBCForDocInWindow(p, day + 1, end, day, p, codeToday);
+                int R = RealSlotsForDocInWindow(p, day + 1, end, day, p, codeToday);
+
+                SolverDiagnostics.Log($"[CHProtect] {FormatDay(day)} {_docs[p].Symbol}: U={U}, R={R}");
+
+                if (R > U) ok.Add(p);
+                else SolverDiagnostics.Log($"[CHProtect] Odrzucono {_docs[p].Symbol} – R<=U w oknie.");
+            }
+            return ok;
+        }
+
+        private List<int> FilterByRollingFeasibility(int day, List<int> cand, int kMin, int kMax)
+        {
+            for (int K = kMin; K <= kMax; K++)
             {
                 var ok = new List<int>(cand.Count);
                 foreach (var p in cand)
@@ -400,35 +411,31 @@ namespace GrafikWPF
             return new List<int>();
         }
 
-        // (C) CRP – preferuj kandydata maksymalizującego gwarantowany prefiks w oknie
         private List<int> OrderByCRP(int day, List<int> cand, int K)
         {
             var scored = new List<(int doc, int pref)>(cand.Count);
-            foreach (var p in cand)
-            {
-                int len = MaxWindowPrefix(day, p, K);
-                scored.Add((p, len));
-            }
+            foreach (var p in cand) scored.Add((p, MaxWindowPrefix(day, p, K)));
+
             scored.Sort((x, y) =>
             {
                 if (x.pref != y.pref) return y.pref.CompareTo(x.pref);
-                // remis: tie-break wg miękkich priorytetów i preferencji
                 return CompareCandidates(day, x.doc, y.doc);
             });
+
             var ordered = new List<int>(scored.Count);
             foreach (var s in scored) ordered.Add(s.doc);
-            SolverDiagnostics.Log($"[CRP] Kolejność po CRP: {string.Join(", ", ordered.ConvertAll(i => _docs[i].Symbol))}");
+            SolverDiagnostics.Log($"[CRP] Kolejność: {string.Join(", ", ordered.ConvertAll(i => _docs[i].Symbol))}");
             return ordered;
         }
 
-        // ====== Kontekst okna RH/CRP ======
+        // ====== Kontekst okna ======
         private sealed class WinCtx
         {
             public List<int> Days = new();
             public Dictionary<int, int> PosByDay = new();
-            public int[] LocalAssign = Array.Empty<int>();  // pos -> doc or UNASSIGNED
-            public int[] LocalWorkInc = Array.Empty<int>(); // per doc
-            public int[] LocalMwInc = Array.Empty<int>();   // per doc
+            public int[] LocalAssign = Array.Empty<int>();
+            public int[] LocalWorkInc = Array.Empty<int>();
+            public int[] LocalMwInc = Array.Empty<int>();
         }
 
         private bool ExistsFullWindow(int day, int forcedDoc, int K)
@@ -476,7 +483,7 @@ namespace GrafikWPF
             int bestPos = -1, bestCnt = int.MaxValue;
             List<int>? bestCands = null;
 
-            // MRV w oknie
+            // MRV
             for (int pos = 0; pos < ctx.Days.Count; pos++)
             {
                 if (ctx.LocalAssign[pos] != UNASSIGNED) continue;
@@ -492,11 +499,7 @@ namespace GrafikWPF
                 var cand = WindowCandidates(ctx, pos);
                 int c = cand.Count;
                 if (c == 0) return false;
-                if (c < bestCnt)
-                {
-                    bestCnt = c; bestPos = pos; bestCands = cand;
-                    if (bestCnt <= 1) break;
-                }
+                if (c < bestCnt) { bestCnt = c; bestPos = pos; bestCands = cand; if (bestCnt <= 1) break; }
             }
 
             bool allAssigned = true;
@@ -506,11 +509,11 @@ namespace GrafikWPF
 
             Debug.Assert(bestPos >= 0 && bestCands != null);
 
-            // Priorytet CH/BC w oknie (tie-break)
             bestCands.Sort((a, b) =>
             {
-                int ra = PrefRank(_pref[ctx.Days[bestPos], a]);
-                int rb = PrefRank(_pref[ctx.Days[bestPos], b]);
+                int d = ctx.Days[bestPos];
+                int ra = PrefRank(_pref[d, a]);
+                int rb = PrefRank(_pref[d, b]);
                 if (ra != rb) return rb.CompareTo(ra);
 
                 double fa = RatioAfterWithLocal(a, ctx.LocalWorkInc[a]);
@@ -518,8 +521,8 @@ namespace GrafikWPF
                 int cmp = fa.CompareTo(fb);
                 if (cmp != 0) return cmp;
 
-                int da = NearestAssignedDistanceGlobal(ctx.Days[bestPos], a);
-                int db = NearestAssignedDistanceGlobal(ctx.Days[bestPos], b);
+                int da = NearestAssignedDistanceGlobal(d, a);
+                int db = NearestAssignedDistanceGlobal(d, b);
                 return db.CompareTo(da);
             });
 
@@ -542,12 +545,9 @@ namespace GrafikWPF
 
             void DFS()
             {
-                // Znajdź pierwszy nieprzydzielony w oknie
                 int nextPos = -1;
                 for (int i = 0; i < ctx.Days.Count; i++)
-                {
                     if (ctx.LocalAssign[i] == UNASSIGNED) { nextPos = i; break; }
-                }
 
                 if (nextPos == -1)
                 {
@@ -555,7 +555,6 @@ namespace GrafikWPF
                     return;
                 }
 
-                // Aktualny prefiks od startu
                 int cur = 0;
                 for (int d = start; d <= end; d++)
                 {
@@ -621,17 +620,18 @@ namespace GrafikWPF
             int d = ctx.Days[pos];
             byte av = _pref[d, doc];
 
-            if (av == PREF_NONE || av == PREF_OD) return false; // OD jako „dzień inny” (sam dzień) – nie stajemy na OD
+            if (av == PREF_NONE || av == PREF_OD) return false;
 
             int used = _work[doc] + ctx.LocalWorkInc[doc];
             if (used >= _limitsByDoc[doc]) return false;
 
-            if (av == PREF_MW && (_mwUsed[doc] + ctx.LocalMwInc[doc]) >= 1) return false;
+            if (av == PREF_MW && (_mwUsed[doc] + ctx.LocalMwInc[doc]) >= _mwMax) return false;
 
             bool isBC = (av == PREF_BC);
+            bool bcCanBreak = _bcBreaksAdjacent && isBC;
 
-            // Zakaz dzień-po-dniu: BC może łamać
-            if (!isBC)
+            // Zakaz dzień-po-dniu – BC może łamać tylko jeśli polityka na to pozwala
+            if (!bcCanBreak)
             {
                 int prev = d - 1, next = d + 1;
                 if (prev >= 0)
@@ -646,8 +646,8 @@ namespace GrafikWPF
                 }
             }
 
-            // Sąsiedztwo „Inny dyżur” ±1: **BC może łamać** (MG/CH/MW nie mogą)
-            if (!isBC)
+            // Sąsiedztwo „Inny dyżur” ±1 – BC może łamać tylko jeśli polityka na to pozwala
+            if (!bcCanBreak)
             {
                 int pv = d - 1, nx = d + 1;
                 if (pv >= 0 && _pref[pv, doc] == PREF_OD) return false;
@@ -673,7 +673,6 @@ namespace GrafikWPF
             int d = ctx.Days[pos];
 
             if (!forced && _assign[d] >= 0 && _assign[d] != doc) return false;
-
             if (!IsFeasibleInWindow(ctx, pos, doc)) return false;
 
             ctx.LocalAssign[pos] = doc;
@@ -704,15 +703,15 @@ namespace GrafikWPF
             int bestPrefixLen = CurrentPrefixLengthFast();
             int appliedBack = 0;
 
-            int budgetMs = GetLocalRepairBudgetMs();
             var swGlobal = Stopwatch.StartNew();
+            int budgetMs = GetLocalRepairBudgetMs();
 
-            for (int back = LR_MIN_BACK; back <= LR_MAX_BACK; back++)
+            for (int back = _lrBackMin; back <= _lrBackMax; back++)
             {
                 if (swGlobal.ElapsedMilliseconds > budgetMs) break;
 
                 int start = Math.Max(0, holeDay - back);
-                int end = Math.Min(_days.Count - 1, holeDay + LR_FWD);
+                int end = Math.Min(_days.Count - 1, holeDay + _lrFwd);
 
                 SolverDiagnostics.Log($"[LocalRepair] Okno: {FormatDay(start)}..{FormatDay(end)} (dziura: {FormatDay(holeDay)}, back={back})");
 
@@ -721,7 +720,7 @@ namespace GrafikWPF
                 var snapMw = (int[])_mwUsed.Clone();
                 int snapFilled = _assignedFilled;
                 bool snapPrefix = _isPrefixActive;
-                int snapPrefixHole = _prefixFirstHole;
+                int snapHole = _prefixFirstHole;
 
                 // wyczyść okno
                 for (int d = start; d <= end; d++)
@@ -777,12 +776,15 @@ namespace GrafikWPF
                     nodes++;
                     var cand = OrderCandidates(d);
 
-                    // mini-prefiks w oknie: (ETAP 1) bez twardej ochrony CH/BC; RH + CRP zostają
                     if (_priorities.Count > 0 && _priorities[0] == SolverPriority.CiagloscPoczatkowa)
                     {
-                        var ok = FilterByRollingFeasibility(d, cand);
-                        if (ok.Count > 0) cand = OrderByCRP(d, ok, RH_MAX_K);
-                        else cand.Clear();
+                        if (_chProtectEnabled)
+                            cand = FilterByCoverBalance(d, cand, _chProtectK);
+                        else
+                            SolverDiagnostics.Log("[CHProtect] OFF – pomijam filtrację w LocalRepair.");
+
+                        var ok = FilterByRollingFeasibility(d, cand, _rhMinK, _rhMaxK);
+                        cand = ok.Count > 0 ? OrderByCRP(d, ok, _rhMaxK) : new List<int>();
                     }
 
                     if (cand.Count == 0)
@@ -838,7 +840,7 @@ namespace GrafikWPF
                     Array.Copy(snapMw, _mwUsed, _mwUsed.Length);
                     _assignedFilled = snapFilled;
                     _isPrefixActive = snapPrefix;
-                    _prefixFirstHole = snapPrefixHole;
+                    _prefixFirstHole = snapHole;
                 }
             }
 
@@ -855,7 +857,7 @@ namespace GrafikWPF
             return baseMs;
         }
 
-        // ====== Lista kandydatów i porządkowanie (ogólne) ======
+        // ====== Kandydaci i ranking ======
         private List<int> OrderCandidates(int day)
         {
             var legal = new List<int>(_docs.Count);
@@ -874,12 +876,12 @@ namespace GrafikWPF
             byte avA = _pref[day, a];
             byte avB = _pref[day, b];
 
-            // Rezerwacja ma bezwzględne pierwszeństwo
+            // Rezerwacja ma bezwzględny priorytet
             int rzA = avA == PREF_RZ ? 1 : 0;
             int rzB = avB == PREF_RZ ? 1 : 0;
             if (rzA != rzB) return rzB.CompareTo(rzA);
 
-            // Priorytety użytkownika (miękkie)
+            // Priorytety użytkownika
             foreach (var pr in _priorities)
             {
                 int cmp = 0;
@@ -887,7 +889,6 @@ namespace GrafikWPF
                 {
                     case SolverPriority.CiagloscPoczatkowa:
                         {
-                            // drobny lookahead: preferuj kandydata, który nie zabija dnia+1
                             bool keepA = KeepsNextFeasible(day, a);
                             bool keepB = KeepsNextFeasible(day, b);
                             cmp = keepB.CompareTo(keepA);
@@ -895,7 +896,9 @@ namespace GrafikWPF
                             break;
                         }
                     case SolverPriority.LacznaLiczbaObsadzonychDni:
+                        // brak bezpośredniego porównania na pojedynczym dniu
                         break;
+
                     case SolverPriority.SprawiedliwoscObciazenia:
                         {
                             double ra = RatioAfter(a);
@@ -915,11 +918,11 @@ namespace GrafikWPF
                 }
             }
 
-            // Tie-break: CH/BC > MG > MW
+            // Tie-break: preferencje
             int pa = PrefRank(avA), pb = PrefRank(avB);
             if (pa != pb) return pb.CompareTo(pa);
 
-            // Potem mniej przydziałów, większy zapas limitu
+            // Potem: mniej dotychczasowych przydziałów, większy zapas limitu
             int wCmp = _work[a].CompareTo(_work[b]);
             if (wCmp != 0) return wCmp;
 
@@ -948,35 +951,34 @@ namespace GrafikWPF
 
             return best == int.MaxValue ? 9999 : best;
         }
-
         private int NearestAssignedDistanceGlobal(int day, int doc) => NearestAssignedDistance(day, doc);
 
-        // ====== Twarde zasady (globalnie) ======
+        // ====== Twarde zasady ======
         private bool IsHardFeasible(int day, int doc)
         {
             if (_work[doc] >= _limitsByDoc[doc]) return false;
 
             byte av = _pref[day, doc];
-
-            if (av == PREF_NONE || av == PREF_OD) return false; // OD = „Dyżur inny” w samym dniu – nie stawiamy
+            if (av == PREF_NONE || av == PREF_OD) return false;
 
             bool isBC = av == PREF_BC;
+            bool bcCanBreak = _bcBreaksAdjacent && isBC;
 
-            // dzień-po-dniu: BC może łamać
-            if (!isBC)
+            // dzień-po-dniu
+            if (!bcCanBreak)
             {
                 if (day > 0 && _assign[day - 1] == doc) return false;
                 if (day + 1 < _days.Count && _assign[day + 1] == doc) return false;
             }
 
-            // sąsiedztwo „Inny dyżur” ±1: **BC może łamać**, MG/CH/MW nie
-            if (!isBC)
+            // „Inny dyżur” ±1
+            if (!bcCanBreak)
             {
                 if (day > 0 && _pref[day - 1, doc] == PREF_OD) return false;
                 if (day + 1 < _days.Count && _pref[day + 1, doc] == PREF_OD) return false;
             }
 
-            if (av == PREF_MW && _mwUsed[doc] >= 1) return false;
+            if (av == PREF_MW && _mwUsed[doc] >= _mwMax) return false;
 
             return true;
         }
@@ -989,13 +991,14 @@ namespace GrafikWPF
             if (av == PREF_NONE || av == PREF_OD) return false;
 
             bool isBC = av == PREF_BC;
+            bool bcCanBreak = _bcBreaksAdjacent && isBC;
 
-            // dzień-po-dniu: BC może łamać
-            if (!isBC && cand == hypoDoc && Math.Abs(dayToCheck - hypoDay) == 1)
+            // dzień-po-dniu
+            if (!bcCanBreak && cand == hypoDoc && Math.Abs(dayToCheck - hypoDay) == 1)
                 return false;
 
-            // sąsiedztwo „Inny dyżur” ±1: **BC może łamać**
-            if (!isBC)
+            // „Inny dyżur” ±1
+            if (!bcCanBreak)
             {
                 if (dayToCheck > 0 && _pref[dayToCheck - 1, cand] == PREF_OD) return false;
                 if (dayToCheck + 1 < _days.Count && _pref[dayToCheck + 1, cand] == PREF_OD) return false;
@@ -1003,7 +1006,7 @@ namespace GrafikWPF
 
             int mw = _mwUsed[cand];
             if (cand == hypoDoc && hypoCode == PREF_MW) mw++;
-            if (av == PREF_MW && mw >= 1) return false;
+            if (av == PREF_MW && mw >= _mwMax) return false;
 
             return true;
         }
@@ -1016,10 +1019,9 @@ namespace GrafikWPF
 
             byte av0 = _pref[day, doc];
             for (int q = 0; q < _docs.Count; q++)
-            {
-                if (!IsHardFeasibleWithHypo(dNext, q, day, doc, av0)) continue;
-                return true;
-            }
+                if (IsHardFeasibleWithHypo(dNext, q, day, doc, av0))
+                    return true;
+
             return false;
         }
 
@@ -1044,7 +1046,7 @@ namespace GrafikWPF
             _ => "--"
         };
 
-        // ====== (Wyłączone) ochrona CH/BC – pozostawione dla ETAP 5 ======
+        // ====== CHProtect: U(c) vs R(c) / kara ======
         private int UniqueCHBCForDocInWindow(int doc, int wStart, int wEnd, int day0, int doc0, byte code0)
         {
             if (wStart > wEnd) return 0;
@@ -1098,11 +1100,16 @@ namespace GrafikWPF
 
         private int FutureCHPenalty(int day, int doc, int k)
         {
-            // ETAP 1: ochrona CH/BC wyłączona -> brak kary
-            return 0;
+            int end = Math.Min(_days.Count - 1, day + k);
+            byte code0 = _pref[day, doc];
+            int U = UniqueCHBCForDocInWindow(doc, day + 1, end, day, doc, code0);
+            int R = RealSlotsForDocInWindow(doc, day + 1, end, day, doc, code0);
+
+            if (R > U) return 0;
+            return (U - R + 1) * 100;
         }
 
-        // ====== Operacje na stanie ======
+        // ====== Operacje stanu ======
         private void Place(int day, int doc, out byte codeToday)
         {
             codeToday = _pref[day, doc];
@@ -1232,7 +1239,6 @@ namespace GrafikWPF
             }
             else
             {
-                // sprawiedliwość = proporcjonalność do limitów (mniejsza suma odchyleń = lepiej)
                 double sumAbs = 0.0;
                 for (int i = 0; i < _docs.Count; i++)
                 {
@@ -1242,7 +1248,6 @@ namespace GrafikWPF
                 sFair = -(long)Math.Round(sumAbs * 1000.0);
             }
 
-            // równomierność (prosty karny „zlepek” za bliskie sąsiedztwo)
             int penalty = 0;
             int[] perDayDoc = new int[_days.Count];
             for (int d = 0; d < _days.Count; d++)
@@ -1265,9 +1270,9 @@ namespace GrafikWPF
             var map = new Dictionary<SolverPriority, long>
             {
                 { SolverPriority.LacznaLiczbaObsadzonychDni, sObs },
-                { SolverPriority.CiagloscPoczatkowa,         sCont },
-                { SolverPriority.SprawiedliwoscObciazenia,   sFair },
-                { SolverPriority.RownomiernoscRozlozenia,     sEven }
+                { SolverPriority.CiagloscPoczatkowa       , sCont },
+                { SolverPriority.SprawiedliwoscObciazenia , sFair },
+                { SolverPriority.RownomiernoscRozlozenia  , sEven }
             };
 
             var vec = new long[_priorities.Count];
@@ -1321,8 +1326,7 @@ namespace GrafikWPF
 
                     var doc = cand[0];
                     Place(day, doc, out var code);
-                    if (code == PREF_RZ)
-                        UnitPropagateReservations(day);
+                    if (code == PREF_RZ) UnitPropagateReservations(day);
                 }
 
                 ConsiderAsBest();

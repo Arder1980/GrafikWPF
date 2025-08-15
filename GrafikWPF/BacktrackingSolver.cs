@@ -1,4 +1,3 @@
-using System.Text;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -9,22 +8,26 @@ using GrafikWPF.Algorithms;
 namespace GrafikWPF
 {
     /// <summary>
-    /// BacktrackingSolver – dwuetapowy solver:
-    /// F1: maksymalizacja prefiksu (ciągłość od początku – jeśli to #1).
-    /// F2: dogęszczanie reszty przy zachowaniu priorytetów.
+    /// BacktrackingSolver – deterministyczny, jednordzeniowy.
+    /// F1: maksymalizacja prefiksu (ciągłość od początku).
+    /// F2: dogęszczanie reszty.
     ///
-    /// Wydajnościowe kroki (deterministyczne):
-    ///  - mikrosito d+1 (twardy forward-check),
-    ///  - buckety kandydatów + tańsze tie-breaki,
-    ///  - cache UB (suffix + okno) i okienkowe UB co każdy poziom,
-    ///  - throttling logów i mniej alokacji w F2.
-    ///  Brak równoległości = pełna powtarzalność wyników.
+    /// Wydajnościowe elementy:
+    ///  - mikrosito d+1 (forward-check),
+    ///  - buckety kandydatów + tani tie-break,
+    ///  - okienkowy i pełny UB (flow) z lokalnym cache,
+    ///  - throttling logów,
+    ///  - oszczędne F2 (buforowana lista).
+    ///
+    /// Integracja:
+    ///  - twarde reguły: SchedulingRules.IsHardFeasible(...),
+    ///  - wektor jakości: SchedulingRules.EvaluateSolution(...).
     /// </summary>
     public sealed class BacktrackingSolver : IGrafikSolver
     {
-        // Preferencje / kody
+        // Kody preferencji (z mapowania TypDostepnosci)
         private const byte PREF_NONE = 0;
-        private const byte PREF_MW = 1; // Mogę warunkowo (max 1)
+        private const byte PREF_MW = 1; // Mogę warunkowo (max 1/mies.)
         private const byte PREF_MG = 2; // Mogę
         private const byte PREF_CH = 3; // Chcę
         private const byte PREF_BC = 4; // Bardzo chcę (może łamać sąsiedztwo)
@@ -46,7 +49,7 @@ namespace GrafikWPF
         private readonly int[] _limitsByDoc;
         private readonly byte[,] _pref; // [day, doc] -> PREF_*
 
-        // Stan rozwiązania
+        // Stan przypisań
         private readonly int[] _assign;     // day -> doc idx; EMPTY/UNASSIGNED
         private readonly int[] _workPerDoc; // globalne obciążenia
         private readonly int[] _mwUsed;
@@ -60,33 +63,32 @@ namespace GrafikWPF
         private int _bestPrefixLen;
         private int[]? _bestPrefixAssign;
 
-        // Pełny UB (dinic) – co ile poziomów
+        // UB/okna
         private const bool F1_USE_FULL_UB = true;
         private const int F1_FULL_UB_EVERY = 8;
-
-        // Okienkowy UB i cache (deterministyczny, lokalny)
         private const int F1_WIN_SIZE = 10;
         private const int F1_WIN_UB_EVERY = 1;
+
         private readonly Dictionary<(int day, ulong capHash), int> _ubCache = new(1024);
         private readonly Dictionary<(int start, int end, ulong capHash), int> _winUbCache = new(2048);
 
-        // Buckety kandydatów per dzień
-        private List<int>[] _buckBC;
-        private List<int>[] _buckCH;
-        private List<int>[] _buckMG;
-        private List<int>[] _buckMW;
+        // Buckety kandydatów
+        private List<int>[] _buckBC = Array.Empty<List<int>>();
+        private List<int>[] _buckCH = Array.Empty<List<int>>();
+        private List<int>[] _buckMG = Array.Empty<List<int>>();
+        private List<int>[] _buckMW = Array.Empty<List<int>>();
         private bool _bucketsReady;
 
-        // Throttling logów F1
+        // Throttling logów
         private const int LOG_EVERY_PRUNE_D1 = 100; // 0 = loguj każdy
         private const int LOG_EVERY_WINUB = 10;  // 0 = loguj każdy
 
-        // Bufor współdzielony dla F2
+        // Bufor F2 (mniej alokacji)
         private readonly List<int> _tmp = new(64);
 
         // Polityki
-        private readonly bool _bcBreaksAdjacent = true;
-        private readonly int _mwMax = 1;
+        private readonly bool _bcBreaksAdjacent = true; // BC może łamać sąsiedztwo
+        private readonly int _mwMax = 1;    // Jedno MW na osobę
 
         public BacktrackingSolver(GrafikWejsciowy input,
                                   IReadOnlyList<SolverPriority> priorities,
@@ -145,7 +147,10 @@ namespace GrafikWPF
             }
 
             var sol = BuildSolution();
+
+            // *** WSPÓLNY WEKTOR JAKOŚCI ***
             var score = EvaluateSolution(sol);
+
             if (_best is null || Better(score, _bestScore!))
             {
                 _best = sol;
@@ -183,62 +188,6 @@ namespace GrafikWPF
         }
 
         // ===================== F1: Maksymalizacja prefiksu (SEKWENCYJNIE) =====================
-        private int F1_SuffixUpperBoundCached(int startDay, int[] curWork)
-        {
-            var key = (startDay, HashRemCap(curWork));
-            if (_ubCache.TryGetValue(key, out var ub)) return ub;
-
-            ub = FlowUB.UBCount(
-                days: _days.Count,
-                docs: _docs.Count,
-                avMask: (d, p) =>
-                {
-                    if (d < startDay) return AvMask.None;
-                    var code = _pref[d, p];
-                    return (code == PREF_NONE || code == PREF_OD) ? AvMask.None : AvMask.Any;
-                },
-                remCapPerDoc: p => Math.Max(0, _limitsByDoc[p] - curWork[p]),
-                dayAllowed: d => d >= startDay
-            );
-            _ubCache[key] = ub;
-            return ub;
-        }
-
-        private int F1_WindowUpperBoundCached(int startDay, int endDay, int[] curWork)
-        {
-            if (endDay < startDay) return 0;
-            var key = (startDay, endDay, HashRemCap(curWork));
-            if (_winUbCache.TryGetValue(key, out var ub)) return ub;
-
-            ub = FlowUB.UBCount(
-                days: _days.Count,
-                docs: _docs.Count,
-                avMask: (d, p) =>
-                {
-                    if (d < startDay || d > endDay) return AvMask.None;
-                    var code = _pref[d, p];
-                    return (code == PREF_NONE || code == PREF_OD) ? AvMask.None : AvMask.Any;
-                },
-                remCapPerDoc: p => Math.Max(0, _limitsByDoc[p] - curWork[p]),
-                dayAllowed: d => d >= startDay && d <= endDay
-            );
-            _winUbCache[key] = ub;
-            return ub;
-        }
-
-        private ulong HashRemCap(int[] curWork)
-        {
-            ulong h = 1469598103934665603ul; // FNV-1a 64
-            const ulong P = 1099511628211ul;
-            for (int p = 0; p < _docs.Count; p++)
-            {
-                uint rem = (uint)Math.Max(0, _limitsByDoc[p] - curWork[p]);
-                h ^= (ulong)rem ^ (ulong)((p + 1) * 16777619);
-                h *= P;
-            }
-            return h;
-        }
-
         private void F1_MaximizePrefix()
         {
             var curA = new int[_days.Count]; Array.Fill(curA, UNASSIGNED);
@@ -294,6 +243,7 @@ namespace GrafikWPF
                 foreach (var doc in cands)
                 {
                     byte code = _pref[day, doc];
+
                     if (!F1_IsFeasible(day, doc, curA, curW, curM)) continue;
 
                     // mikrosito d+1 – ślepe zaułki odcinamy twardo
@@ -321,51 +271,10 @@ namespace GrafikWPF
             DFS(0);
         }
 
-        // === Buckety kandydatów per dzień ===
-        private void EnsureBucketsBuilt()
-        {
-            if (_bucketsReady) return;
-
-            int D = _days.Count;
-            int P = _docs.Count;
-
-            _buckBC = new List<int>[D];
-            _buckCH = new List<int>[D];
-            _buckMG = new List<int>[D];
-            _buckMW = new List<int>[D];
-
-            for (int d = 0; d < D; d++)
-            {
-                _buckBC[d] = new List<int>(Math.Max(4, P / 6));
-                _buckCH[d] = new List<int>(Math.Max(4, P / 6));
-                _buckMG[d] = new List<int>(Math.Max(4, P / 6));
-                _buckMW[d] = new List<int>(Math.Max(4, P / 6));
-
-                for (int p = 0; p < P; p++)
-                {
-                    byte code = _pref[d, p];
-                    if (code == PREF_BC) _buckBC[d].Add(p);
-                    else if (code == PREF_CH) _buckCH[d].Add(p);
-                    else if (code == PREF_MG) _buckMG[d].Add(p);
-                    else if (code == PREF_MW) _buckMW[d].Add(p);
-                }
-            }
-
-            _bucketsReady = true;
-        }
-
-        private static int PrefWeight(byte code) => code switch
-        {
-            PREF_BC => 0,
-            PREF_CH => 1,
-            PREF_MG => 2,
-            PREF_MW => 3,
-            _ => 4
-        };
-
+        // --- F1: pomocnicze ---
         private List<int> F1_OrderCandidates(int day, int[] curAssign, int[] curWork, int[] curMW)
         {
-            // Rezerwacje – jeżeli jakieś jednak są w danych F1
+            // Rezerwacje (często brak w F1, bo wrapper je wyciął)
             var RZ = new List<int>();
             for (int p = 0; p < _docs.Count; p++)
             {
@@ -379,7 +288,7 @@ namespace GrafikWPF
                 return RZ;
             }
 
-            // Buckety BC→CH→MG→MW
+            // Buckety BC→CH→MG→MW (szybka wstępna selekcja)
             var baseList = new List<int>(
                 (_buckBC[day]?.Count ?? 0) +
                 (_buckCH[day]?.Count ?? 0) +
@@ -444,6 +353,18 @@ namespace GrafikWPF
             return cands;
         }
 
+        private static int PrefWeight(byte code)
+        {
+            switch (code)
+            {
+                case PREF_BC: return 0;
+                case PREF_CH: return 1;
+                case PREF_MG: return 2;
+                case PREF_MW: return 3;
+                default: return 4;
+            }
+        }
+
         private int TieBreakF1(int day, int a, int b, int[] curAssign, int[] curWork)
         {
             int la = _limitsByDoc[a], lb = _limitsByDoc[b];
@@ -463,23 +384,9 @@ namespace GrafikWPF
 
         private bool F1_IsFeasible(int day, int doc, int[] curAssign, int[] curWork, int[] curMW)
         {
-            if (curWork[doc] >= _limitsByDoc[doc]) return false;
-
-            byte av = _pref[day, doc];
-            if (av == PREF_NONE || av == PREF_OD) return false;
-
-            bool isBC = (av == PREF_BC);
-
-            // sąsiedztwo: BC może łamać
-            if (!_bcBreaksAdjacent || !isBC)
-            {
-                if (day > 0 && curAssign[day - 1] == doc) return false;
-                if (day + 1 < _days.Count && _pref[day + 1, doc] == PREF_OD) return false;
-            }
-
-            if (av == PREF_MW && (curMW[doc] >= _mwMax)) return false;
-
-            return true;
+            // Delegacja do wspólnych reguł – ale w kontekście lokalnych tablic stanu
+            var ctx = BuildCtx(isPrefixActive: true, assign: curAssign, work: curWork, mw: curMW);
+            return SchedulingRules.IsHardFeasible(day, doc, ctx);
         }
 
         private bool KeepsNextFeasible(int day, int doc, int[] curAssign, int[] curWork, int[] curMW)
@@ -599,9 +506,11 @@ namespace GrafikWPF
 
         private int SelectByTieBreakF2(int day, List<int> candidates)
         {
+            // Pozostawiamy Twoją deterministykę F2 (sprawiedliwość/rozłożenie),
+            // bo EvaluateSolution i tak spina scoring. Stabilizator = indeks.
             candidates.Sort((a, b) =>
             {
-                foreach (var pr in _priorities.Skip(1)) // #2..#4
+                foreach (var pr in _priorities.Skip(1)) // #2..#4 (bez "ciągłości od początku", bo prefiks już ustalony)
                 {
                     int cmp = 0;
                     switch (pr)
@@ -627,28 +536,16 @@ namespace GrafikWPF
                             break;
                     }
                 }
-                return a.CompareTo(b); // stabilizator
+                return a.CompareTo(b);
             });
             return candidates[0];
         }
 
         private bool IsHardFeasibleGlobal(int day, int doc)
         {
-            if (_assign[day] != UNASSIGNED) return false;
-            if (_workPerDoc[doc] >= _limitsByDoc[doc]) return false;
-
-            byte av = _pref[day, doc];
-            if (av == PREF_NONE || av == PREF_OD) return false;
-
-            bool isBC = (av == PREF_BC);
-            if (!isBC)
-            {
-                if (day > 0 && _assign[day - 1] == doc) return false;
-                if (day + 1 < _days.Count && _pref[day + 1, doc] == PREF_OD) return false;
-            }
-
-            if (av == PREF_MW && (_mwUsed[doc] >= _mwMax)) return false;
-            return true;
+            // Twarde reguły – na bazie GLOBALNYCH pól (_assign/_workPerDoc/_mwUsed)
+            var ctx = BuildCtx(isPrefixActive: false);
+            return SchedulingRules.IsHardFeasible(day, doc, ctx);
         }
 
         private void PlaceGlobal(int day, int doc)
@@ -667,81 +564,34 @@ namespace GrafikWPF
             return sol;
         }
 
+        // *** Wspólna ocena jakości ***
         private long[] EvaluateSolution(RozwiazanyGrafik sol)
         {
-            long sObs = 0, sCont = 0, sFair = 0, sEven = 0;
-
-            var perDoc = new int[_docs.Count];
-            for (int d = 0; d < _days.Count; d++)
-            {
-                if (sol.Przypisania.TryGetValue(_days[d], out var l) && l is not null)
-                {
-                    sObs++;
-                    if (_docIdxBySymbol.TryGetValue(l.Symbol, out var idx))
-                        perDoc[idx]++;
-                }
-            }
-            for (int d = 0; d < _days.Count; d++)
-            {
-                if (!sol.Przypisania.TryGetValue(_days[d], out var l) || l is null) break;
-                sCont++;
-            }
-
-            long sumLimits = 0;
-            var lims = new long[_docs.Count];
-            for (int i = 0; i < _docs.Count; i++)
-            {
-                lims[i] = _limitsByDoc[i];
-                sumLimits += lims[i];
-            }
-            long sumWork = 0;
-            for (int i = 0; i < _docs.Count; i++)
-                sumWork += perDoc[i];
-
-            if (sumWork == 0) sFair = 0;
-            else
-            {
-                double acc = 0.0;
-                for (int i = 0; i < _docs.Count; i++)
-                {
-                    double w = perDoc[i] / (double)sumWork;
-                    double L = lims[i] / (double)sumLimits;
-                    acc += Math.Abs(w - L);
-                }
-                sFair = (long)Math.Round((1.0 - acc) * 1_000_000);
-            }
-
-            int minDist = int.MaxValue;
-            for (int d = 0; d < _days.Count; d++)
-            {
-                if (sol.Przypisania.TryGetValue(_days[d], out var l) && l is not null)
-                {
-                    int prev = int.MaxValue, next = int.MaxValue;
-                    for (int k = d - 1; k >= 0; k--) if (sol.Przypisania[_days[k]]?.Symbol == l.Symbol) { prev = d - k; break; }
-                    for (int k = d + 1; k < _days.Count; k++) if (sol.Przypisania[_days[k]]?.Symbol == l.Symbol) { next = k - d; break; }
-                    minDist = Math.Min(minDist, Math.Min(prev, next));
-                }
-            }
-            sEven = (minDist == int.MaxValue) ? 0 : minDist;
-
-            long[] vec = new long[4];
-            foreach (var pr in _priorities.Select((p, i) => (p, i)))
-            {
-                vec[pr.i] = pr.p switch
-                {
-                    SolverPriority.CiagloscPoczatkowa => sCont,
-                    SolverPriority.LacznaLiczbaObsadzonychDni => sObs,
-                    SolverPriority.SprawiedliwoscObciazenia => sFair,
-                    SolverPriority.RownomiernoscRozlozenia => sEven,
-                    _ => 0
-                };
-            }
-            return vec;
+            // Kontekst na bazie aktualnych TABLIC stanu (globalnych)
+            var ctx = BuildCtx(isPrefixActive: false);
+            return SchedulingRules.EvaluateSolution(sol, _priorities, ctx);
         }
 
-        private static string FormatScore(long[] v) => $"[{string.Join(", ", v)}]";
-
         // ===================== Utils =====================
+        private SchedulingRules.Context BuildCtx(bool isPrefixActive, int[]? assign = null, int[]? work = null, int[]? mw = null)
+        {
+            // Uwaga: limits z _input (po redukcji wrappera), dla spójności z innymi silnikami
+            var limits = _docs.ToDictionary(d => d.Symbol, d =>
+                _input.LimityDyzurow.TryGetValue(d.Symbol, out var lim) ? lim : _days.Count);
+
+            return new SchedulingRules.Context(
+                days: _days,
+                doctors: _docs,
+                avail: _av,
+                limits: limits,
+                priorities: _priorities,
+                assign: assign ?? _assign,
+                work: work ?? _workPerDoc,
+                mwUsed: mw ?? _mwUsed,
+                isPrefixActive: isPrefixActive
+            );
+        }
+
         private double RatioAfter(int work, int limit)
         {
             double lim = Math.Max(1, limit);
@@ -768,16 +618,19 @@ namespace GrafikWPF
             return best == int.MaxValue ? 9999 : best;
         }
 
-        private string PrefToString(byte code) => code switch
+        private string PrefToString(byte code)
         {
-            PREF_BC => "BC",
-            PREF_CH => "CH",
-            PREF_MG => "MG",
-            PREF_MW => "MW",
-            PREF_RZ => "RZ",
-            PREF_OD => "OD",
-            _ => "--"
-        };
+            switch (code)
+            {
+                case PREF_BC: return "BC";
+                case PREF_CH: return "CH";
+                case PREF_MG: return "MG";
+                case PREF_MW: return "MW";
+                case PREF_RZ: return "RZ";
+                case PREF_OD: return "OD";
+                default: return "--";
+            }
+        }
 
         private void ApplyPrefixSnapshot(int[] snap, int len)
         {
@@ -805,6 +658,8 @@ namespace GrafikWPF
 
         private string FormatDay(int dayIndex) => $"{_days[dayIndex]:yyyy-MM-dd}";
 
+        private static string FormatScore(long[] v) => $"[{string.Join(", ", v)}]";
+
         private bool Better(long[] cur, long[] best)
         {
             for (int i = 0; i < Math.Min(cur.Length, best.Length); i++)
@@ -815,12 +670,92 @@ namespace GrafikWPF
             return false;
         }
 
-        private void LogCandidates(int day, List<int> cand, int[] curAssign, int[] curWork)
+        private void EnsureBucketsBuilt()
         {
-            SolverDiagnostics.Log($"--- [F1] Kandydaci dnia {FormatDay(day)} ---");
-            foreach (var p in cand)
-                SolverDiagnostics.Log($"  ✓ {_docs[p].Symbol} [{PrefToString(_pref[day, p])}]  (pracuje={curWork[p]}, limit={_limitsByDoc[p]})");
-            SolverDiagnostics.Log($"--- /[F1] Kandydaci dnia {FormatDay(day)} ---");
+            if (_bucketsReady) return;
+
+            int D = _days.Count;
+            int P = _docs.Count;
+
+            _buckBC = new List<int>[D];
+            _buckCH = new List<int>[D];
+            _buckMG = new List<int>[D];
+            _buckMW = new List<int>[D];
+
+            for (int d = 0; d < D; d++)
+            {
+                _buckBC[d] = new List<int>(Math.Max(4, P / 6));
+                _buckCH[d] = new List<int>(Math.Max(4, P / 6));
+                _buckMG[d] = new List<int>(Math.Max(4, P / 6));
+                _buckMW[d] = new List<int>(Math.Max(4, P / 6));
+
+                for (int p = 0; p < P; p++)
+                {
+                    byte code = _pref[d, p];
+                    if (code == PREF_BC) _buckBC[d].Add(p);
+                    else if (code == PREF_CH) _buckCH[d].Add(p);
+                    else if (code == PREF_MG) _buckMG[d].Add(p);
+                    else if (code == PREF_MW) _buckMW[d].Add(p);
+                }
+            }
+
+            _bucketsReady = true;
+        }
+
+        private int F1_SuffixUpperBoundCached(int startDay, int[] curWork)
+        {
+            var key = (startDay, HashRemCap(curWork));
+            if (_ubCache.TryGetValue(key, out var ub)) return ub;
+
+            ub = FlowUB.UBCount(
+                days: _days.Count,
+                docs: _docs.Count,
+                avMask: (d, p) =>
+                {
+                    if (d < startDay) return AvMask.None;
+                    var code = _pref[d, p];
+                    return (code == PREF_NONE || code == PREF_OD) ? AvMask.None : AvMask.Any;
+                },
+                remCapPerDoc: p => Math.Max(0, _limitsByDoc[p] - curWork[p]),
+                dayAllowed: d => d >= startDay
+            );
+            _ubCache[key] = ub;
+            return ub;
+        }
+
+        private int F1_WindowUpperBoundCached(int startDay, int endDay, int[] curWork)
+        {
+            if (endDay < startDay) return 0;
+            var key = (startDay, endDay, HashRemCap(curWork));
+            if (_winUbCache.TryGetValue(key, out var ub)) return ub;
+
+            ub = FlowUB.UBCount(
+                days: _days.Count,
+                docs: _docs.Count,
+                avMask: (d, p) =>
+                {
+                    if (d < startDay || d > endDay) return AvMask.None;
+                    var code = _pref[d, p];
+                    return (code == PREF_NONE || code == PREF_OD) ? AvMask.None : AvMask.Any;
+                },
+                remCapPerDoc: p => Math.Max(0, _limitsByDoc[p] - curWork[p]),
+                dayAllowed: d => d >= startDay && d <= endDay
+            );
+            _winUbCache[key] = ub;
+            return ub;
+        }
+
+        private ulong HashRemCap(int[] curWork)
+        {
+            ulong h = 1469598103934665603ul; // FNV-1a 64
+            const ulong P = 1099511628211ul;
+            for (int p = 0; p < _docs.Count; p++)
+            {
+                uint rem = (uint)Math.Max(0, _limitsByDoc[p] - curWork[p]);
+                h ^= (ulong)rem ^ (ulong)((p + 1) * 16777619);
+                h *= P;
+            }
+            return h;
         }
     }
 }

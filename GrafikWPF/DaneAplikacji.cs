@@ -12,7 +12,9 @@
         public List<SolverPriority> KolejnoscPriorytetowSolvera { get; set; } = new();
 
         public SolverType WybranyAlgorytm { get; set; } = SolverType.Backtracking;
-
+        public bool LogowanieWlaczone { get; set; } = true;
+        public LogMode TrybLogowania { get; set; } = LogMode.Info;
+        public string KatalogLogow { get; set; } = "";
 
         public void InicjalizujPriorytety()
         {

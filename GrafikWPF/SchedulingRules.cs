@@ -7,12 +7,12 @@ namespace GrafikWPF
 {
     /// <summary>
     /// Wspólne zasady dla wszystkich solverów (Backtracking, A*, metaheurystyki).
-    /// - BC (BardzoChce) może łamać: (a) zakaz dzień-po-dniu, (b) zakaz sąsiedztwa z „Dyżur (inny)”.
-    /// - MW (Mogę warunkowo): co najwyżej 1/miesiąc na lekarza (nie jest obowiązkowy).
-    /// - „Rezerwowanie” przyszłych CH/BC: tylko, gdy są „unikalne” (dzień ma ≤1 realnego kandydata CH/BC).
+    /// - BCH (BardzoChce) może łamać: (a) zakaz dzień-po-dniu, (b) zakaz sąsiedztwa z „Dyżur (inny)”.
+    /// - WAR (Mogę warunkowo): co najwyżej 1/miesiąc na lekarza (nie jest obowiązkowy).
+    /// - „Rezerwowanie” przyszłych CHC/BCH: tylko, gdy są „unikalne” (dzień ma ≤1 realnego kandydata CHC/BCH).
     /// - Priorytety użytkownika sterują kolejnością sortowania kandydatów i polityką rezerw (OFF/SOFT/HARD).
-    /// - Ocena rozwiązania: (1) maks. obsada, (2) ciągłość prefiksu, (3) sprawiedliwość ∝ limitom,
-    ///   (4) równomierność (karzemy skupiska).
+    /// - Ocena rozwiązania: (1) obsada, (2) ciągłość prefiksu, (3) sprawiedliwość ∝ limitom,
+    ///   (4) równomierność (karzemy skupiska), (5) zgodność z ważnością deklaracji (BCH>CHC>MOG>WAR).
     /// </summary>
     public static class SchedulingRules
     {
@@ -20,7 +20,7 @@ namespace GrafikWPF
 
         public enum ReservePolicy { Off, Soft, Hard }
 
-        // „Jak bardzo wyjątkowe” muszą być przyszłe CH/BC, by je chronić (1 = unikalne)
+        // „Jak bardzo wyjątkowe” muszą być przyszłe CHC/BCH, by je chronić (1 = unikalne)
         private const int UNIQUE_CHBC_THRESHOLD = 1;
 
         public sealed class Context
@@ -34,7 +34,7 @@ namespace GrafikWPF
             // Stan (uzupełnia solver):
             public int[] Assign;  // dzień -> idx lekarza; UNASSIGNED=nieobsadzone, -1=PUSTO
             public int[] Work;    // ile dyżurów ma lekarz
-            public int[] MwUsed;  // zużycia MW
+            public int[] MwUsed;  // zużycia MW/WAR
             public bool IsPrefixActive;
 
             // Wygody:
@@ -101,17 +101,17 @@ namespace GrafikWPF
 
             bool isBC = av == TypDostepnosci.BardzoChce;
 
-            // Zakaz dzień-po-dniu (BC może łamać)
+            // Zakaz dzień-po-dniu (BCH może łamać)
             if (!isBC)
             {
                 if (day > 0 && ctx.Assign[day - 1] == doc) return false;
                 if (day + 1 < ctx.Dn && ctx.Assign[day + 1] == doc) return false;
             }
 
-            // Zakaz sąsiedztwa z „Inny dyżur” (BC może łamać)
+            // Zakaz sąsiedztwa z „Dyżur inny” (BCH może łamać)
             if (!isBC && IsNextToOtherDuty(day, doc, ctx)) return false;
 
-            // MW – maks. 1 na lekarza (nie wymuszamy użycia)
+            // WAR – maks. 1 na lekarza (nie wymuszamy użycia)
             if (av == TypDostepnosci.MogeWarunkowo && ctx.MwUsed[doc] >= 1) return false;
 
             return true;
@@ -133,7 +133,7 @@ namespace GrafikWPF
             return false;
         }
 
-        // ================== Polityka rezerw CH/BC ==================
+        // ================== Polityka rezerw CHC/BCH ==================
         public static ReservePolicy GetReservePolicy(int day, Context ctx)
         {
             var p1 = ctx.Priorities.Count > 0 ? ctx.Priorities[0] : SolverPriority.LacznaLiczbaObsadzonychDni;
@@ -148,11 +148,12 @@ namespace GrafikWPF
                 SolverPriority.LacznaLiczbaObsadzonychDni => nextLooksBad ? ReservePolicy.Off : ReservePolicy.Soft,
                 SolverPriority.SprawiedliwoscObciazenia => ReservePolicy.Soft,
                 SolverPriority.RownomiernoscRozlozenia => ReservePolicy.Soft,
+                SolverPriority.ZgodnoscWaznosciDeklaracji => ReservePolicy.Soft,
                 _ => ReservePolicy.Soft,
             };
         }
 
-        // HARD filtruje MG/MW tylko, gdy zjadają „unikalne” przyszłe CH/BC
+        // HARD filtruje MOG/WAR tylko, gdy zjadają „unikalne” przyszłe CHC/BCH
         public static bool WouldStealFromFutureUniqueChBc(int day, int doc, Context ctx)
         {
             var avToday = ctx.Av(day, doc);
@@ -174,7 +175,7 @@ namespace GrafikWPF
                 bool isChBcHere = avDoc is TypDostepnosci.Chce or TypDostepnosci.BardzoChce;
                 if (!isChBcHere) continue;
 
-                // policz ilu realnych kandydatów CH/BC ma ten dzień
+                // policz ilu realnych kandydatów CHC/BCH ma ten dzień
                 int feasibleChBc = 0;
                 for (int q = 0; q < ctx.Pn; q++)
                 {
@@ -182,7 +183,7 @@ namespace GrafikWPF
                     if (av is not (TypDostepnosci.Chce or TypDostepnosci.BardzoChce)) continue;
 
                     bool isBC = av == TypDostepnosci.BardzoChce;
-                    // lokalna wykonalność: dzień-po-dniu i Inny dyżur (BC może łamać)
+                    // lokalna wykonalność: dzień-po-dniu i Inny dyżur (BCH może łamać)
                     if (!isBC)
                     {
                         if (d > 0 && ctx.Assign[d - 1] == q) continue;
@@ -218,7 +219,6 @@ namespace GrafikWPF
         public static int ContinuityLookaheadSpan(int day, int doc, Context ctx, int window = 4)
         {
             int end = Math.Min(ctx.Dn - 1, day + window);
-            // dziś: sprawdzamy, czy doc jest w ogóle legalny (tu heavy check robi solver)
             int span = 1;
 
             for (int d = day + 1; d <= end; d++)
@@ -257,7 +257,7 @@ namespace GrafikWPF
 
             bool isBC = av == TypDostepnosci.BardzoChce;
 
-            // hipotetyczne dzień-po-dniu z wyborem w hypoDay (BC może łamać)
+            // hipotetyczne dzień-po-dniu z wyborem w hypoDay (BCH może łamać)
             if (!isBC && cand == hypoDoc && Math.Abs(dayToCheck - hypoDay) == 1)
                 return false;
 
@@ -312,25 +312,40 @@ namespace GrafikWPF
                 switch (pr)
                 {
                     case SolverPriority.CiagloscPoczatkowa:
-                        int spanA = ContinuityLookaheadSpan(day, a, ctx, window: 4);
-                        int spanB = ContinuityLookaheadSpan(day, b, ctx, window: 4);
-                        cmp = spanB.CompareTo(spanA); // większy span lepiej
-                        if (cmp != 0) return cmp;
-                        break;
+                        {
+                            int spanA = ContinuityLookaheadSpan(day, a, ctx, window: 4);
+                            int spanB = ContinuityLookaheadSpan(day, b, ctx, window: 4);
+                            cmp = spanB.CompareTo(spanA); // większy span lepiej
+                            if (cmp != 0) return cmp;
+                            break;
+                        }
 
                     case SolverPriority.SprawiedliwoscObciazenia:
-                        double ra = RatioAfter(a, ctx);
-                        double rb = RatioAfter(b, ctx);
-                        cmp = ra.CompareTo(rb); // mniejszy lepszy
-                        if (cmp != 0) return cmp;
-                        break;
+                        {
+                            double ra = RatioAfter(a, ctx);
+                            double rb = RatioAfter(b, ctx);
+                            cmp = ra.CompareTo(rb); // mniejszy lepszy
+                            if (cmp != 0) return cmp;
+                            break;
+                        }
 
                     case SolverPriority.RownomiernoscRozlozenia:
-                        int da = NearestAssignedDistance(day, a, ctx);
-                        int db = NearestAssignedDistance(day, b, ctx);
-                        cmp = db.CompareTo(da); // większy dystans lepiej
-                        if (cmp != 0) return cmp;
-                        break;
+                        {
+                            int da = NearestAssignedDistance(day, a, ctx);
+                            int db = NearestAssignedDistance(day, b, ctx);
+                            cmp = db.CompareTo(da); // większy dystans lepiej
+                            if (cmp != 0) return cmp;
+                            break;
+                        }
+
+                    case SolverPriority.ZgodnoscWaznosciDeklaracji:
+                        {
+                            // Lokalna preferencja dnia: BCH > CHC > MOG > WAR > reszta
+                            int pa = PrefRank(avA), pb = PrefRank(avB);
+                            cmp = pb.CompareTo(pa); // większa ranga (bliżej BCH) lepiej
+                            if (cmp != 0) return cmp;
+                            break;
+                        }
 
                     case SolverPriority.LacznaLiczbaObsadzonychDni:
                         // brak lokalnego rozróżnienia – przechodzimy dalej
@@ -338,6 +353,7 @@ namespace GrafikWPF
                 }
             }
 
+            // Gdy „Zgodność…” nie była wcześniej, Soft rezerwacje i tak dociążą BCH/CHC
             if (policy == ReservePolicy.Soft)
             {
                 int pa = PrefRank(avA), pb = PrefRank(avB);
@@ -382,13 +398,15 @@ namespace GrafikWPF
 
             long sFair = ComputeProportionalFairness(perDoc, assigned, ctx);
             long sEven = ComputeEvenness(sol, ctx);
+            long sDecl = ScoreFromDouble01(ComputeDeclarationImportanceCompliance(sol, ctx));
 
             var map = new Dictionary<SolverPriority, long>
             {
                 { SolverPriority.LacznaLiczbaObsadzonychDni, sObs },
                 { SolverPriority.CiagloscPoczatkowa, sCont },
                 { SolverPriority.SprawiedliwoscObciazenia, sFair },
-                { SolverPriority.RownomiernoscRozlozenia, sEven }
+                { SolverPriority.RownomiernoscRozlozenia, sEven },
+                { SolverPriority.ZgodnoscWaznosciDeklaracji, sDecl }
             };
 
             var vec = new long[priorities.Count];
@@ -400,12 +418,12 @@ namespace GrafikWPF
         // ======= drobne narzędzia =======
         private static int PrefRank(TypDostepnosci a) => a switch
         {
-            TypDostepnosci.Rezerwacja => 5,
-            TypDostepnosci.BardzoChce => 4,
-            TypDostepnosci.Chce => 3,
-            TypDostepnosci.Moge => 2,
-            TypDostepnosci.MogeWarunkowo => 1,
-            _ => 0
+            TypDostepnosci.Rezerwacja => 5, // REZ – zawsze najwyżej lokalnie
+            TypDostepnosci.BardzoChce => 4, // BCH
+            TypDostepnosci.Chce => 3, // CHC
+            TypDostepnosci.Moge => 2, // MOG
+            TypDostepnosci.MogeWarunkowo => 1, // WAR
+            _ => 0  // URL/DYZ/---/Niedostępny
         };
 
         private static double RatioAfter(int doc, Context ctx)
@@ -462,5 +480,41 @@ namespace GrafikWPF
             }
             return -penalty; // większe = lepsze
         }
+
+        // ======= Priorytet 5: zgodność z ważnością deklaracji =======
+        // Liczony tylko po miękkich deklaracjach: BCH(4) > CHC(3) > MOG(2) > WAR(1); inne pomijamy.
+        // Zwraca [0..1], 1.0 = same trafienia w BCH.
+        private static double ComputeDeclarationImportanceCompliance(RozwiazanyGrafik sol, Context ctx)
+        {
+            if (sol?.Przypisania == null || sol.Przypisania.Count == 0) return 0.0;
+
+            double sum = 0;
+            int cnt = 0;
+
+            foreach (var kv in sol.Przypisania)
+            {
+                var date = kv.Key;
+                var doc = kv.Value;
+                if (doc == null) continue;
+
+                if (!ctx.Avail.TryGetValue(date, out var map) || map == null) continue;
+                if (!map.TryGetValue(doc.Symbol, out var td)) continue;
+
+                int w = td switch
+                {
+                    TypDostepnosci.BardzoChce => 4, // BCH
+                    TypDostepnosci.Chce => 3, // CHC
+                    TypDostepnosci.Moge => 2, // MOG
+                    TypDostepnosci.MogeWarunkowo => 1, // WAR
+                    _ => 0 // REZ/URL/DYZ/--- nie liczymy do zgodności
+                };
+                if (w > 0) { sum += w; cnt++; }
+            }
+
+            if (cnt == 0) return 0.0;
+            return sum / (4.0 * cnt);
+        }
+
+        private static long ScoreFromDouble01(double v) => (long)Math.Round(v * 1_000_000);
     }
 }

@@ -33,7 +33,9 @@
 
         public RozwiazanyGrafik ZnajdzOptymalneRozwiazanie()
         {
-            // ZMIANA: Zaczynamy od rozwiązania "chciwego", a nie w pełni losowego.
+            RunLogger.Start("TS", _daneWejsciowe, _kolejnoscPriorytetow);
+
+            // Start od rozwiązania „chciwego”
             var obecneRozwiazanie = _utility.StworzChciweRozwiazaniePoczatkowe();
             var najlepszeRozwiazanie = new Dictionary<DateTime, Lekarz?>(obecneRozwiazanie);
 
@@ -78,9 +80,9 @@
 
                     if (sasiadFitnessFull > najlepszyFitness)
                     {
-                        najlepszyFitness = sasiadFitnessFull;
                         najlepszeRozwiazanie = new Dictionary<DateTime, Lekarz?>(obecneRozwiazanie);
-                        iteracjeBezPoprawy = 0;
+                        najlepszyFitness = sasiadFitnessFull;
+                        RunLogger.TraceImprove($"fitness={najlepszyFitness:F6} (TabuSearch)");
                     }
                     else
                     {
@@ -97,7 +99,9 @@
                 _progressReporter?.Report((double)(i + 1) / _maxIterations);
             }
 
-            return EvaluationAndScoringService.CalculateMetrics(najlepszeRozwiazanie, _utility.ObliczOblozenie(najlepszeRozwiazanie), _daneWejsciowe);
+            var __result = EvaluationAndScoringService.CalculateMetrics(najlepszeRozwiazanie, _utility.ObliczOblozenie(najlepszeRozwiazanie), _daneWejsciowe);
+            RunLogger.Stop(__result);
+            return __result;
         }
 
         private List<Dictionary<DateTime, Lekarz?>> GenerujSasiadow(Dictionary<DateTime, Lekarz?> obecny)

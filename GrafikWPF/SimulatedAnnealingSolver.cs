@@ -33,6 +33,8 @@
 
         public RozwiazanyGrafik ZnajdzOptymalneRozwiazanie()
         {
+            RunLogger.Start("SA", _daneWejsciowe, _kolejnoscPriorytetow);
+
             // ZMIANA: Zaczynamy od rozwiązania "chciwego", a nie w pełni losowego.
             var currentSolution = _utility.StworzChciweRozwiazaniePoczatkowe();
             var bestSolution = new Dictionary<DateTime, Lekarz?>(currentSolution);
@@ -78,7 +80,9 @@
                 }
             }
 
-            return EvaluationAndScoringService.CalculateMetrics(bestSolution, _utility.ObliczOblozenie(bestSolution), _daneWejsciowe);
+            var __result = EvaluationAndScoringService.CalculateMetrics(bestSolution, _utility.ObliczOblozenie(bestSolution), _daneWejsciowe);
+            RunLogger.Stop(__result);
+            return __result;
         }
     }
 }

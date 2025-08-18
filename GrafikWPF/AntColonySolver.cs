@@ -33,6 +33,8 @@ namespace GrafikWPF
 
         public RozwiazanyGrafik ZnajdzOptymalneRozwiazanie()
         {
+            RunLogger.Start("AC", _daneWejsciowe, _kolejnoscPriorytetow);
+
             InitializePheromones();
             var bestSolution = new Dictionary<DateTime, Lekarz?>();
             double bestFitness = double.MinValue;
@@ -71,7 +73,9 @@ namespace GrafikWPF
                 _progressReporter?.Report((double)(i + 1) / _maxGenerations);
             }
 
-            return EvaluationAndScoringService.CalculateMetrics(bestSolution, _utility.ObliczOblozenie(bestSolution), _daneWejsciowe);
+            var __result = EvaluationAndScoringService.CalculateMetrics(bestSolution, _utility.ObliczOblozenie(bestSolution), _daneWejsciowe);
+            RunLogger.Stop(__result);
+            return __result;
         }
 
         private void InitializePheromones()
@@ -131,7 +135,7 @@ namespace GrafikWPF
                 }
 
                 newSolution[dzien] = wybranyLekarz;
-                oblozenie[wybranyLekarz.Symbol]++;
+                oblozenie[wybranyLekarz!.Symbol]++;
                 if (_daneWejsciowe.Dostepnosc[dzien][wybranyLekarz.Symbol] == TypDostepnosci.MogeWarunkowo)
                 {
                     wykorzystaneW.Add(wybranyLekarz.Symbol);
@@ -154,7 +158,7 @@ namespace GrafikWPF
 
         private void EvaporatePheromones()
         {
-            foreach (var dzien in _pheromoneMatrix.Keys)
+            foreach (var dzien in _pheromoneMatrix.Keys.ToList())
             {
                 foreach (var lekarzSymbol in _pheromoneMatrix[dzien].Keys.ToList())
                 {
@@ -166,8 +170,7 @@ namespace GrafikWPF
         private void UpdatePheromones(Dictionary<DateTime, Lekarz?> solution, double fitness)
         {
             if (fitness <= 0) return;
-            // Skala fitnessu się zmieniła, więc depozyt feromonu wymaga dostosowania.
-            // Używamy potęgi, aby wzmocnić różnice między dobrymi a bardzo dobrymi wynikami.
+
             double pheromoneDeposit = Math.Pow(fitness / 1_000_000_000_000, 2);
 
             foreach (var entry in solution)

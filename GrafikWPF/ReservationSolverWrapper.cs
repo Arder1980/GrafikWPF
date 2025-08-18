@@ -128,7 +128,7 @@ namespace GrafikWPF
 
                 if (r1 && r2)
                 {
-                    SolverDiagnostics.Log($"[WrapperRepair] UWAGA: dwie rezerwacje dzień-po-dniu dla {a.Symbol} ({Fmt(d1)} & {Fmt(d2)}). Pomijam.");
+                    RunLogger.Info($"[WrapperRepair] Dwie rezerwacje dzień-po-dniu ({Fmt(d1)} i {Fmt(d2)}) – brak zmian (pozostawiono rezerwacje).");
                     continue;
                 }
                 else if (r1 && !r2) { dayToFix = d2; symToRemove = b.Symbol; }
@@ -149,11 +149,11 @@ namespace GrafikWPF
                     plan[dayToFix] = replacement;
                     oblozenie[old.Symbol]--;
                     oblozenie[replacement.Symbol]++;
-                    SolverDiagnostics.Log($"[WrapperRepair] Zamiana: {Fmt(dayToFix)} {old.Symbol} ➜ {replacement.Symbol} (naprawa d+1 bez BC).");
+                    RunLogger.Info($"[WrapperRepair] Zamiana: {Fmt(dayToFix)} {old.Symbol} ➜ {replacement.Symbol} (naprawa d+1 bez BC).");
                 }
                 else
                 {
-                    SolverDiagnostics.Log($"[WrapperRepair] Brak zamiennika dla {Fmt(dayToFix)} ({symToRemove}) – zeruję ten dzień.");
+                    RunLogger.Info($"[WrapperRepair] Brak zamiennika dla {Fmt(dayToFix)} ({symToRemove}) – zeruję ten dzień.");
                     var old = plan[dayToFix]!;
                     oblozenie[old.Symbol]--;
                     plan[dayToFix] = null;
@@ -170,7 +170,7 @@ namespace GrafikWPF
             var prev = dzien.AddDays(-1);
             var next = dzien.AddDays(1);
 
-            // KANDYDACI w kolejności deterministycznej
+            // KANDYDATÓW sortujemy deterministycznie
             var kandydaci = _oryginalneDane.Lekarze
                 .OrderBy(l => l.Nazwisko).ThenBy(l => l.Imie).ThenBy(l => l.Symbol)
                 .Where(l => l.Symbol != symbolDoWyczyszczenia)
@@ -201,7 +201,7 @@ namespace GrafikWPF
 
                 bool isBC = avHere == TypDostepnosci.BardzoChce;
 
-                // 4) Zakaz „d+1 bez BC” (względem sąsiadów)
+                // 4) Zakaz „d+1 bez BC”
                 if (!isBC)
                 {
                     if (plan.TryGetValue(prev, out var p) && p != null && p.Symbol == sym) continue;
@@ -215,22 +215,17 @@ namespace GrafikWPF
                     if (Av(next, sym) == TypDostepnosci.DyzurInny) continue;
                 }
 
-                // 6) Scoring kandydata – BC>CH>MG>MW + zapas limitu + odległość
+                // 6) Scoring: BC>CH>MG>MW + zapas limitu + odległość
                 double score =
                     Score(avHere) * 1000.0
                     + (limit - oblozenie.GetValueOrDefault(sym, 0)) * 10.0
                     + NearestAssignedDistance(plan, dzien, sym);
 
-                if (score > bestScore)
+                if (score > bestScore ||
+                    (Math.Abs(score - bestScore) < 1e-9 && best != null && string.Compare(sym, best.Symbol, StringComparison.Ordinal) < 0))
                 {
                     bestScore = score;
                     best = k;
-                }
-                else if (Math.Abs(score - bestScore) < 1e-9 && best != null)
-                {
-                    // deterministyczny tie-break: najpierw po Symbol
-                    if (string.Compare(sym, best.Symbol, StringComparison.Ordinal) < 0)
-                        best = k;
                 }
             }
 
@@ -238,7 +233,6 @@ namespace GrafikWPF
         }
 
         // ====== Pomocnicze ======
-
         private TypDostepnosci Av(DateTime day, string sym)
         {
             if (!_oryginalneDane.Dostepnosc.TryGetValue(day, out var map)) return TypDostepnosci.Niedostepny;

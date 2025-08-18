@@ -1,46 +1,87 @@
 ﻿<Window x:Class="GrafikWPF.UstawieniaOgolneWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        xmlns:local="clr-namespace:GrafikWPF"
-        mc:Ignorable="d"
-        Title="Ustawienia Ogólne" Height="260" Width="500"
+        Title="Ustawienia ogólne"
+        Height="360"
+        Width="900"
+        MinWidth="720"
+        ResizeMode="CanResize"
         WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize"
-        Background="LightGray">
-    <Grid Margin="15">
+        Background="{DynamicResource AppWindowBackground}">
+
+    <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="8"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="8"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="8"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="170"/>
+            <ColumnDefinition Width="12"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
 
-        <TextBlock Grid.Row="0" Text="Ustawienia Ogólne" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center"/>
-        <Separator Grid.Row="1" Margin="0,10,0,10"/>
+        <!-- Nazwa oddziału -->
+        <TextBlock Grid.Row="0" Grid.Column="0" Text="Nazwa oddziału:" VerticalAlignment="Center"/>
+        <TextBox   Grid.Row="0" Grid.Column="2" Text="{Binding NazwaOddzialu}" Margin="4,0,0,0"/>
 
-        <Grid Grid.Row="2">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
+        <!-- Nazwa szpitala -->
+        <TextBlock Grid.Row="2" Grid.Column="0" Text="Nazwa szpitala:" VerticalAlignment="Center"/>
+        <TextBox   Grid.Row="2" Grid.Column="2" Text="{Binding NazwaSzpitala}" Margin="4,0,0,0"/>
+
+        <!-- Logowanie (w jednej linii) -->
+        <TextBlock Grid.Row="4" Grid.Column="0" Text="Logowanie:" VerticalAlignment="Center"/>
+        <Grid Grid.Row="4" Grid.Column="2" Margin="4,0,0,0" VerticalAlignment="Center">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="12"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="8"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-
-            <TextBlock Grid.Row="0" Grid.Column="0" Text="Nazwa Oddziału/Zakładu:" VerticalAlignment="Center" Margin="0,0,10,0"/>
-            <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding NazwaOddzialu, UpdateSourceTrigger=PropertyChanged}" VerticalContentAlignment="Center" Padding="2"/>
-
-            <TextBlock Grid.Row="1" Grid.Column="0" Text="Pełna Nazwa Szpitala:" VerticalAlignment="Center" Margin="0,10,10,0"/>
-            <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding NazwaSzpitala, UpdateSourceTrigger=PropertyChanged}" VerticalContentAlignment="Center" Padding="2" Margin="0,10,0,0"/>
+            <CheckBox x:Name="ChkLogEnabled" Grid.Column="0" Content="Włączone" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="2" Text="Tryb:" VerticalAlignment="Center"/>
+            <ComboBox x:Name="CmbLogMode" Grid.Column="4" Width="120" VerticalAlignment="Center">
+                <ComboBoxItem Content="Info"/>
+                <ComboBoxItem Content="Debug"/>
+            </ComboBox>
         </Grid>
 
-        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button Content="Zapisz i Zamknij" IsDefault="True" Click="Zapisz_Click" Margin="0,0,10,0" Padding="10,5"/>
-            <Button Content="Anuluj" IsCancel="True" Padding="10,5"/>
+        <!-- Folder logów -->
+        <TextBlock Grid.Row="6" Grid.Column="0" Text="Folder logów:" VerticalAlignment="Center"/>
+        <Grid Grid.Row="6" Grid.Column="2" Margin="4,0,0,0" VerticalAlignment="Center">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="10"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="8"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <TextBox x:Name="TxtLogDir"
+                     Grid.Column="0"
+                     MinWidth="420"
+                     HorizontalAlignment="Stretch"
+                     IsReadOnly="True"
+                     TextWrapping="NoWrap"
+                     ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                     VerticalContentAlignment="Center"
+                     ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+
+            <Button x:Name="BtnPick" Content="Wybierz..." Grid.Column="2" MinWidth="100" Click="PickLogDir_Click"/>
+            <Button x:Name="BtnOpen" Content="Otwórz"    Grid.Column="4" MinWidth="90"  Click="OpenLogDir_Click"/>
+        </Grid>
+
+        <!-- Przyciski -->
+        <StackPanel Grid.Row="8" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Zapisz" Width="110" Margin="0,16,0,0" Click="Zapisz_Click"/>
+            <Button Content="Anuluj" Width="110" Margin="8,16,0,0" IsCancel="True"/>
         </StackPanel>
     </Grid>
 </Window>

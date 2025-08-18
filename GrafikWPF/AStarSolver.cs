@@ -103,7 +103,7 @@ namespace GrafikWPF
             Array.Copy(prioPart, _caps, prioPart.Length);
             i += prioPart.Length;
 
-            _caps[i++] = long.MaxValue; // Rezerwacje nie mają limitu
+            _caps[i++] = long.MaxValue; // Rezerwacje nie mają limitu (liczone oddzielnie jeśli potrzeba)
             _caps[i++] = _totBC;
             _caps[i++] = _totCh;
             _caps[i++] = _totMg;
@@ -113,6 +113,8 @@ namespace GrafikWPF
 
         public RozwiazanyGrafik ZnajdzOptymalneRozwiazanie()
         {
+            RunLogger.Start("AS", _in, _prio);
+
             int[] wlSeed;
             int[] seed = GreedySeed.Generate(_in, out wlSeed);
             if (_opt.UseLocalSearch) LocalSearch.Improve(seed, _in);
@@ -217,7 +219,9 @@ namespace GrafikWPF
             }
 
         RETURN:
-            return ToMetrics(bestAssign);
+            var __best = ToMetrics(bestAssign);
+            RunLogger.Stop(__best);
+            return __best;
         }
 
         private void InitZobrist()

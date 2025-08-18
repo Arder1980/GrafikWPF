@@ -51,6 +51,8 @@ namespace GrafikWPF
 
         public RozwiazanyGrafik ZnajdzOptymalneRozwiazanie()
         {
+            RunLogger.Start("GS", _daneWejsciowe, _kolejnoscPriorytetow);
+
             StworzPopulacjePoczatkowa();
             ObliczDopasowanie();
 
@@ -77,9 +79,12 @@ namespace GrafikWPF
                 _progressReporter?.Report((double)(i + 1) / _generations);
             }
 
-            _progressReporter?.Report(1.0);
             var finalnyNajlepszy = _population.OrderByDescending(c => c.Fitness).First();
-            return EvaluationAndScoringService.CalculateMetrics(finalnyNajlepszy.Genes, _utility.ObliczOblozenie(finalnyNajlepszy.Genes), _daneWejsciowe);
+            var __map = finalnyNajlepszy.Genes;
+            var __ob = _utility.ObliczOblozenie(__map);
+            var __result = EvaluationAndScoringService.CalculateMetrics(__map, __ob, _daneWejsciowe);
+            RunLogger.Stop(__result);
+            return __result;
         }
 
         private void StworzPopulacjePoczatkowa()

@@ -14,12 +14,15 @@ namespace GrafikWPF
         public class PriorityItem
         {
             public SolverPriority Priority { get; set; }
-            public string Name { get; set; } = string.Empty;
-            public string Description { get; set; } = string.Empty;
+            public string Name { get; set; } = string.Empty;        // np. "Priorytet 1: Ciągłość obsady"
+            public string Description { get; set; } = string.Empty; // dłuższe objaśnienie
         }
 
-        public ObservableCollection<PriorityItem> PriorityList { get; set; }
-        public List<SolverPriority> NewOrder { get; private set; }
+        // Zawartość listy w oknie
+        public ObservableCollection<PriorityItem> PriorityList { get; set; } = new();
+
+        // Zwracana kolejność po "Zapisz i Zamknij"
+        public List<SolverPriority> NewOrder { get; private set; } = new();
 
         private PriorityItem? _selectedPriority;
         public PriorityItem? SelectedPriority
@@ -31,44 +34,40 @@ namespace GrafikWPF
         public PrioritiesWindow(List<SolverPriority> currentOrder)
         {
             InitializeComponent();
-            this.DataContext = this;
+            DataContext = this;
 
-            PriorityList = new ObservableCollection<PriorityItem>();
-            NewOrder = new List<SolverPriority>(currentOrder);
+            // Bezpieczna kolejność: weź to, co przyszło, dołóż brakujące enumy (np. nowy piąty)
+            var all = Enum.GetValues(typeof(SolverPriority)).Cast<SolverPriority>().ToList();
+            var order = (currentOrder ?? new List<SolverPriority>()).Where(all.Contains).ToList();
+            foreach (var p in all) if (!order.Contains(p)) order.Add(p);
 
-            LoadPriorities(currentOrder);
+            LoadPriorities(order);
             UpdateItemNames();
         }
 
         private void LoadPriorities(List<SolverPriority> order)
         {
             PriorityList.Clear();
-            var allPriorities = Enum.GetValues(typeof(SolverPriority)).Cast<SolverPriority>();
-
-            foreach (var priority in order)
+            foreach (var p in order)
             {
-                if (allPriorities.Contains(priority))
+                PriorityList.Add(new PriorityItem
                 {
-                    PriorityList.Add(CreatePriorityItem(priority));
-                }
-            }
-            foreach (var priority in allPriorities)
-            {
-                if (!PriorityList.Any(p => p.Priority == priority))
-                {
-                    PriorityList.Add(CreatePriorityItem(priority));
-                }
+                    Priority = p,
+                    Name = GetEnumDescription(p),           // krótka nazwa do wiersza
+                    Description = GetEnumLongDescription(p) // dłuższe objaśnienie
+                });
             }
         }
 
-        private PriorityItem CreatePriorityItem(SolverPriority priority)
+        private void UpdateItemNames()
         {
-            return new PriorityItem
+            // Nadaj numery "Priorytet 1/2/..."
+            for (int i = 0; i < PriorityList.Count; i++)
             {
-                Priority = priority,
-                Name = GetEnumDescription(priority),
-                Description = GetEnumLongDescription(priority)
-            };
+                string shortName = GetEnumDescription(PriorityList[i].Priority);
+                PriorityList[i].Name = $"Priorytet {i + 1}: {shortName}";
+            }
+            PrioritiesListBox.Items.Refresh();
         }
 
         private void UpdateButtonState()
@@ -86,15 +85,7 @@ namespace GrafikWPF
             }
         }
 
-        private void UpdateItemNames()
-        {
-            for (int i = 0; i < PriorityList.Count; i++)
-            {
-                PriorityList[i].Name = $"Priorytet {i + 1}: {GetEnumDescription(PriorityList[i].Priority)}";
-            }
-            PrioritiesListBox.Items.Refresh();
-        }
-
+        // ====== Handlery przycisków (layout jak w Twoim XAML) ======
         private void MoveUp_Click(object sender, RoutedEventArgs e)
         {
             if (SelectedPriority == null) return;
@@ -110,68 +101,81 @@ namespace GrafikWPF
         {
             if (SelectedPriority == null) return;
             int index = PriorityList.IndexOf(SelectedPriority);
-            if (index < PriorityList.Count - 1)
+            if (index >= 0 && index < PriorityList.Count - 1)
             {
                 PriorityList.Move(index, index + 1);
                 UpdateItemNames();
             }
         }
 
-        private void Save_Click(object sender, RoutedEventArgs e)
-        {
-            NewOrder = PriorityList.Select(p => p.Priority).ToList();
-            this.DialogResult = true;
-            this.Close();
-        }
-
         private void RestoreDefaults_Click(object sender, RoutedEventArgs e)
         {
-            var defaultOrder = new List<SolverPriority>
+            // Twoja dotychczasowa „domyślna” kolejność + dopięty 5. priorytet na końcu
+            var def = new List<SolverPriority>
             {
                 SolverPriority.CiagloscPoczatkowa,
                 SolverPriority.LacznaLiczbaObsadzonychDni,
                 SolverPriority.SprawiedliwoscObciazenia,
-                SolverPriority.RownomiernoscRozlozenia
+                SolverPriority.RownomiernoscRozlozenia,
+                SolverPriority.ZgodnoscWaznosciDeklaracji // nowy piąty
             };
-            LoadPriorities(defaultOrder);
+            LoadPriorities(def);
             UpdateItemNames();
         }
 
+        private void Save_Click(object sender, RoutedEventArgs e)
+        {
+            NewOrder = PriorityList.Select(p => p.Priority).ToList();
+            DialogResult = true;
+            Close();
+        }
+
+        // ====== Nazwa krótka pobierana z [Description] na enumie (fallback: mapowanie) ======
         public static string GetEnumDescription(Enum value)
         {
+            // jeśli enum ma [Description("...")] — użyj go
             FieldInfo? fi = value.GetType().GetField(value.ToString());
-            if (fi == null) return value.ToString();
-
-            DescriptionAttribute[]? attributes = fi.GetCustomAttributes(typeof(DescriptionAttribute), false) as DescriptionAttribute[];
-            if (attributes != null && attributes.Any())
+            if (fi != null)
             {
-                return attributes.First().Description;
+                var attrs = fi.GetCustomAttributes(typeof(DescriptionAttribute), false) as DescriptionAttribute[];
+                if (attrs != null && attrs.Length > 0) return attrs[0].Description;
+            }
+
+            // fallback — nazwy „po ludzku”
+            if (value is SolverPriority sp)
+            {
+                return sp switch
+                {
+                    SolverPriority.CiagloscPoczatkowa => "Ciągłość obsady",
+                    SolverPriority.LacznaLiczbaObsadzonychDni => "Obsada (łączna)",
+                    SolverPriority.SprawiedliwoscObciazenia => "Sprawiedliwość (σ obciążeń)",
+                    SolverPriority.RownomiernoscRozlozenia => "Równomierność (czasowa)",
+                    SolverPriority.ZgodnoscWaznosciDeklaracji => "Zgodność z ważnością deklaracji",
+                    _ => value.ToString()
+                };
             }
             return value.ToString();
         }
 
-        public static string GetEnumLongDescription(SolverPriority priority)
+        // ====== Dłuższe opisy (pełne nazwy, bez skrótów) ======
+        public static string GetEnumLongDescription(SolverPriority p) => p switch
         {
-            switch (priority)
-            {
-                case SolverPriority.CiagloscPoczatkowa:
-                    return "Cel: zapewnienie jak najdłuższej nieprzerwanej obsady dyżurów od początku miesiąca.";
-                case SolverPriority.LacznaLiczbaObsadzonychDni:
-                    return "Cel: zapewnienie jak największej liczby obsadzonych dyżurów w całym miesiącu.";
-                case SolverPriority.SprawiedliwoscObciazenia:
-                    return "Cel: jak najbardziej sprawiedliwy podział dyżurów, proporcjonalny do zadeklarowanych przez lekarzy limitów.";
-                case SolverPriority.RownomiernoscRozlozenia:
-                    return "Cel: jak najbardziej regularne rozłożenie dyżurów danego lekarza w czasie (unikanie grupowania dyżurów jednej osoby w krótkim okresie czasu).";
-                default:
-                    return "";
-            }
-        }
+            SolverPriority.CiagloscPoczatkowa =>
+                "Cel: zapewnienie jak najdłuższej nieprzerwanej obsady dyżurów od początku miesiąca.",
+            SolverPriority.LacznaLiczbaObsadzonychDni =>
+                "Cel: maksymalna liczba obsadzonych dyżurów w całym miesiącu.",
+            SolverPriority.SprawiedliwoscObciazenia =>
+                "Cel: możliwie sprawiedliwy podział dyżurów, proporcjonalny do zadeklarowanych limitów.",
+            SolverPriority.RownomiernoscRozlozenia =>
+                "Cel: równy rozrzut dyżurów w czasie (ograniczanie skupisk dzień-po-dniu).",
+            SolverPriority.ZgodnoscWaznosciDeklaracji =>
+                "Cel: preferowanie przydziałów zgodnych z deklaracjami: „Bardzo chcę” > „Chcę” > „Mogę” > „Mogę warunkowo”. Deklaracje takie jak: „Rezerwacja”, „Urlop”, „Dyżur inny” i „Nie mogę”, ze względu na swój szczególny charakter, nie są tu uwzględniane.",
+            _ => string.Empty
+        };
 
+        // ====== INotifyPropertyChanged ======
         public event PropertyChangedEventHandler? PropertyChanged;
         protected void OnPropertyChanged([CallerMemberName] string? name = null)
-        {
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
-            UpdateButtonState();
-        }
+            => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
     }
 }

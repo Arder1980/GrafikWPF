@@ -1,19 +1,19 @@
 ﻿using System.ComponentModel;
 
-namespace GrafikWPF
+public enum SolverPriority
 {
-    public enum SolverPriority
-    {
-        [Description("Ciągłość obsady od początku miesiąca")]
-        CiagloscPoczatkowa,
+    [Description("Ciągłość obsady")]
+    CiagloscPoczatkowa = 0,
 
-        [Description("Maksymalna liczba obsadzonych dni")]
-        LacznaLiczbaObsadzonychDni,
+    [Description("Obsada (łączna)")]
+    LacznaLiczbaObsadzonychDni = 1,
 
-        [Description("Sprawiedliwe obciążenie lekarzy")]
-        SprawiedliwoscObciazenia,
+    [Description("Sprawiedliwość (σ obciążeń)")]
+    SprawiedliwoscObciazenia = 2,
 
-        [Description("Równomierne rozłożenie dyżurów w czasie")]
-        RownomiernoscRozlozenia
-    }
+    [Description("Równomierność (czasowa)")]
+    RownomiernoscRozlozenia = 3,
+
+    [Description("Zgodność z ważnością deklaracji")]
+    ZgodnoscWaznosciDeklaracji = 4
 }

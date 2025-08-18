@@ -941,17 +941,15 @@ namespace GrafikWPF
             _isManualCancellation = false;
 
             // === LOGOWANIE: start po kliknięciu „Generuj Grafik” ===
+            // === LOGOWANIE: start (RunLogger)
             try
             {
-                SolverDiagnostics.Enabled = true; // włączamy logowanie na czas generowania
-                if (!SolverDiagnostics.IsActive) SolverDiagnostics.Start(); // solver wykryje, że log już działa
-                SolverDiagnostics.Log("== [UI] Start generowania grafiku ==");
-                SolverDiagnostics.LogKeyValue("WybranyAlgorytm", DataManager.AppData.WybranyAlgorytm.ToString());
-                var prioDesc = DataManager.AppData.KolejnoscPriorytetowSolvera
-                    .Select(p => PrioritiesWindow.GetEnumDescription(p));
-                SolverDiagnostics.LogKeyValue("Priorytety", string.Join(" > ", prioDesc));
+                // Konfiguracja jest trzymana w DaneAplikacji (patrz pkt 4) i stosowana w solverach w momencie Start.
+                RunLogger.Info("== [UI] Start generowania grafiku ==");
+                RunLogger.Info($"WybranyAlgorytm={DataManager.AppData.WybranyAlgorytm}");
+                RunLogger.Info("Priorytety=" + string.Join(" > ", DataManager.AppData.KolejnoscPriorytetowSolvera));
             }
-            catch { /* log jest pomocniczy – nie zatrzymujemy generowania */ }
+            catch { }
 
             await ZapiszBiezacyMiesiac();
             if (string.IsNullOrEmpty(_aktualnyKluczMiesiaca) || !DataManager.AppData.DaneGrafikow.ContainsKey(_aktualnyKluczMiesiaca))

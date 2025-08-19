@@ -748,16 +748,20 @@ namespace GrafikWPF
             _ => 0
         };
 
-        private string PrefToString(byte code) => code switch
+        private string PrefToString(byte code)
         {
-            PREF_BC => "BCH",
-            PREF_CH => "CHC",
-            PREF_MG => "MOG",
-            PREF_MW => "WAR",
-            PREF_RZ => "REZ",
-            PREF_OD => "DYZ",
-            _ => "---"
-        };
+            return code switch
+            {
+                PREF_BC => "BCH",
+                PREF_CH => "CHC",
+                PREF_MG => "MOG",
+                PREF_MW => "WAR",
+                PREF_RZ => "REZ",
+                PREF_OD => "DYZ",
+                _ => "---",
+            };
+        }
+
 
         private void ApplyPrefixSnapshot(int[] snap, int len)
         {

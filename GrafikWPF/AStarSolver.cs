@@ -12,6 +12,8 @@ namespace GrafikWPF
         private const int CLOSURE_EVERY = 1;
         private const int FLOW_EVERY_DEPTH = 6;
 
+        private const long DEBUG_EVERY_STEPS = 2000; // co ile kroków pisać krótkie logi DEBUG
+
         private readonly GrafikWejsciowy _in;
         private readonly List<SolverPriority> _prio;
         private readonly IProgress<double>? _progress;
@@ -103,7 +105,7 @@ namespace GrafikWPF
             Array.Copy(prioPart, _caps, prioPart.Length);
             i += prioPart.Length;
 
-            _caps[i++] = long.MaxValue; // Rezerwacje nie mają limitu (liczone oddzielnie jeśli potrzeba)
+            _caps[i++] = long.MaxValue; // Rezerwacje
             _caps[i++] = _totBC;
             _caps[i++] = _totCh;
             _caps[i++] = _totMg;
@@ -126,6 +128,9 @@ namespace GrafikWPF
             long[] bestVec = EvaluationAndScoringService.ToIntVector(bestMetrics, _prio);
             int[] bestAssign = (int[])seed.Clone();
 
+            if (RunLogger.IsDebug)
+                RunLogger.Debug($"SEED: vec=[{string.Join(",", bestVec)}]; days={_days}; docs={_docs}; opt={{UseARA={_opt.UseARAStar}, W={_opt.WeightedAStarW:F2}, T={_opt.TimeBudgetSeconds}s}}");
+
             var start = NewRootNode();
             var budgetAt = DateTime.UtcNow.AddSeconds(_opt.TimeBudgetSeconds);
 
@@ -133,6 +138,7 @@ namespace GrafikWPF
             var epsSchedule = _opt.UseARAStar ? _opt.EpsilonSchedule : new[] { startW };
 
             long steps = 0;
+            bool timedOut = false;
 
             foreach (var eps in epsSchedule)
             {
@@ -140,10 +146,13 @@ namespace GrafikWPF
                 var closed = new Dictionary<(int, long), long[]>(1 << 18);
                 Enqueue(open, start, eps);
 
+                if (RunLogger.IsDebug)
+                    RunLogger.Debug($"BEGIN phase eps={eps:F3}; caps=[{string.Join(",", _caps)}]");
+
                 while (open.Count > 0)
                 {
                     _ct.ThrowIfCancellationRequested();
-                    if (DateTime.UtcNow > budgetAt) goto RETURN;
+                    if (DateTime.UtcNow > budgetAt) { timedOut = true; goto RETURN; }
 
                     var cur = open.Dequeue();
 
@@ -156,10 +165,17 @@ namespace GrafikWPF
                     if ((_opt.ProgressReportModulo > 0) && ((steps & _opt.ProgressReportModulo) == 0))
                         _progress?.Report((double)(cur.Day + 1) / Math.Max(1, _days));
 
+                    if (RunLogger.IsDebug && (steps % DEBUG_EVERY_STEPS == 0))
+                        RunLogger.Debug($"step={steps}; day={cur.Day}; open={open.Count}; best=[{string.Join(",", bestVec)}]");
+
                     if ((steps % CLOSURE_EVERY) == 0)
                     {
                         var (cand, vec) = GreedyClosure(cur);
-                        if (Less(vec, bestVec)) { bestVec = vec; bestAssign = cand; }
+                        if (Less(vec, bestVec))
+                        {
+                            bestVec = vec; bestAssign = cand;
+                            if (RunLogger.IsDebug) RunLogger.TraceImprove($"closure@day={cur.Day + 1}: best=[{string.Join(",", bestVec)}]");
+                        }
                     }
 
                     if (cur.Day == _days - 1)
@@ -167,7 +183,11 @@ namespace GrafikWPF
                         var a = Reconstruct(cur);
                         var m = ToMetrics(a);
                         var v = EvaluationAndScoringService.ToIntVector(m, _prio);
-                        if (Less(v, bestVec)) { bestVec = v; bestAssign = a; }
+                        if (Less(v, bestVec))
+                        {
+                            bestVec = v; bestAssign = a;
+                            if (RunLogger.IsDebug) RunLogger.TraceImprove($"goal@day={cur.Day}: best=[{string.Join(",", bestVec)}]");
+                        }
                         continue;
                     }
 
@@ -220,6 +240,10 @@ namespace GrafikWPF
 
         RETURN:
             var __best = ToMetrics(bestAssign);
+
+            if (timedOut) RunLogger.Info($"Stop reason: TIME BUDGET EXCEEDED ({_opt.TimeBudgetSeconds}s); steps={steps}");
+            else RunLogger.Info($"Stop reason: SEARCH EXHAUSTED / FINISHED; steps={steps}");
+
             RunLogger.Stop(__best);
             return __best;
         }
@@ -252,9 +276,13 @@ namespace GrafikWPF
             };
         }
 
-        private void Enqueue(PriorityQueue<Node, (long, long, long, long, long, long, long, long, long)> pq, Node n, double eps, long[]? fOverrideVec = null)
+        private void Enqueue(
+            PriorityQueue<Node, (long, long, long, long, long, long, long, long, long)> pq,
+            Node n,
+            double eps,
+            long[]? F = null)
         {
-            var F = fOverrideVec ?? AddWithCaps(n.G, Heur(n, eps));
+            F ??= AddWithCaps(n.G, Heur(n, eps));
             var key = ToKeyForMinHeap(F, n);
             pq.Enqueue(n, key);
         }
@@ -522,7 +550,7 @@ namespace GrafikWPF
             for (int d = 0; d < _days; d++)
             {
                 int best = -1;
-                long[] bestDelta = null!;
+                long[]? bestDelta = null;
 
                 var lst = _staticCands[d];
                 for (int i = 0; i < lst.Count; i++)
@@ -563,7 +591,7 @@ namespace GrafikWPF
             for (int d = baseNode.Day + 1; d < _days; d++)
             {
                 int best = -1;
-                long[] bestDelta = null!;
+                long[]? bestDelta = null;
 
                 var lst = _staticCands[d];
                 for (int i = 0; i < lst.Count; i++)

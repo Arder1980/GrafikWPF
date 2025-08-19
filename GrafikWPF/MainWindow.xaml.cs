@@ -170,15 +170,10 @@ namespace GrafikWPF
                 Interval = TimeSpan.FromSeconds(1)
             };
 
-            _mapaNazwDostepnosci = new Dictionary<string, TypDostepnosci>
-            {
-                { "---", TypDostepnosci.Niedostepny }, { "Mogę", TypDostepnosci.Moge },
-                { "Chcę", TypDostepnosci.Chce }, { "Bardzo chcę", TypDostepnosci.BardzoChce },
-                { "Rezerwacja", TypDostepnosci.Rezerwacja },
-                { "Urlop", TypDostepnosci.Urlop }, { "Dyżur (inny)", TypDostepnosci.DyzurInny },
-                { "Mogę warunkowo", TypDostepnosci.MogeWarunkowo }
-            };
+            _mapaNazwDostepnosci = Deklaracje.UiMap();
             _mapaDostepnosciDoNazw = _mapaNazwDostepnosci.ToDictionary(kp => kp.Value, kp => kp.Key);
+
+            OpcjeDostepnosci = _mapaNazwDostepnosci.Keys.ToList();
 
             OpcjeDostepnosci = new List<string>
             {

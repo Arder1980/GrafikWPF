@@ -1,28 +1,48 @@
 ﻿// FILE: GrafikWPF/RunLogger.cs
+#nullable enable
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 
 namespace GrafikWPF
 {
     public enum LogMode { Info, Debug }
 
+    /// <summary>
+    /// Jednolity logger uruchomień solverów.
+    /// - Nazwa pliku: YYYY_MM_{SolverAcronym}_{Info|Debug}_{yyyyMMdd_HHmmss}.txt
+    /// - Nagłówek: tabela deklaracji (---/WAR/MOG/CHC/BCH/REZ/DYZ/URL) + wiersz „Data/Limit”
+    /// - Treść: wpisy INFO/DEBUG/IMPROVE + na końcu „pełny grafik”, zestawienia per lekarz oraz „PODSUMOWANIE PRIORYTETÓW”
+    /// - Korzysta z Deklaracje.cs (kody, pełne nazwy, wagi preferencji)
+    /// </summary>
     public static class RunLogger
     {
         private static readonly object Gate = new();
+
         private static StreamWriter? _w;
         private static bool _active;
         private static bool _enabled = true;
         private static LogMode _mode = LogMode.Info;
-        private static string _dir = "";
-        private static string _solver = "XX";
-        private static GrafikWejsciowy? _data;
-        private static IReadOnlyList<SolverPriority>? _prio;
-        private static DateTime _t0;
+        private static string _dir = string.Empty;
 
+        private static string _solver = "?";
+        private static GrafikWejsciowy? _in;
+        private static IReadOnlyList<SolverPriority> _prio = Array.Empty<SolverPriority>();
+        private static DateTime _startedAtUtc;
+        private static string _filePath = string.Empty;
+
+        // Ustawienia nagłówka tabeli
+        private const int DateColWidth = 12; // „dd.MM.yyyy”
+        private const int ColWidthMin = 4;   // min. szerokość kolumny lekarza
+
+        // ---------------- API ----------------
+
+        /// <summary>Konfiguracja logowania (wywołaj przy starcie aplikacji i/lub po zapisaniu ustawień w oknie Ustawienia).</summary>
         public static void Configure(bool enabled, LogMode mode, string? logsDirectory)
         {
             lock (Gate)
@@ -36,293 +56,317 @@ namespace GrafikWPF
             }
         }
 
-        public static void Start(string solverAcronym, GrafikWejsciowy dane, IReadOnlyList<SolverPriority> priorytety, string? startNote = null)
+        /// <summary>Wewnętrzny przełącznik – czy wolno wypisywać cięższe logi.</summary>
+        public static bool IsDebug => _enabled && _active && _mode == LogMode.Debug;
+
+        /// <summary>Start jednego przebiegu solvera (tworzy plik i pisze nagłówek z tabelą deklaracji).</summary>
+        public static void Start(string solverAcronym, GrafikWejsciowy input, IReadOnlyList<SolverPriority> priorytety, string? startNote = null)
         {
             lock (Gate)
             {
-                if (_active || !_enabled) { _solver = solverAcronym; _data = dane; _prio = priorytety; return; }
+                if (_active || !_enabled) { _solver = solverAcronym; _in = input; _prio = priorytety; return; }
 
                 _solver = solverAcronym;
-                _data = dane;
-                _prio = priorytety;
-                _t0 = DateTime.Now;
+                _in = input;
+                _prio = priorytety ?? Array.Empty<SolverPriority>();
+                _startedAtUtc = DateTime.UtcNow;
 
-                var firstDay = dane.DniWMiesiacu.OrderBy(d => d).FirstOrDefault();
-                var yearMonth = firstDay == default ? $"{DateTime.Now:yyyy_MM}" : $"{firstDay:yyyy_MM}";
-                var fname = $"{yearMonth}_{_solver}_{_mode.ToString().ToUpperInvariant()}_{_t0:yyyyMMdd_HHmmss}.txt";
-                var baseDir = string.IsNullOrWhiteSpace(_dir) ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs") : _dir;
-                Directory.CreateDirectory(baseDir);
-                var path = Path.Combine(baseDir, fname);
+                string ym = (_in.DniWMiesiacu.Count > 0 ? _in.DniWMiesiacu[0] : DateTime.Today).ToString("yyyy_MM", CultureInfo.InvariantCulture);
+                string ts = _startedAtUtc.ToLocalTime().ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+                string file = $"{ym}_{_solver}_{_mode.ToString().ToUpperInvariant()}_{ts}.txt";
+                _filePath = Path.Combine(_dir, file);
 
-                _w = new StreamWriter(path, false, new UTF8Encoding(false));
+                _w = new StreamWriter(new FileStream(_filePath, FileMode.Create, FileAccess.Write, FileShare.Read), new UTF8Encoding(false));
                 _active = true;
 
-                WriteLine("====================================================================");
-                WriteLine($"Start: {_t0:yyyy-MM-dd HH:mm:ss}");
+                // Nagłówek
                 WriteLine($"Solver: {_solver}");
+                WriteLine($"Start:  {_startedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss}");
                 if (!string.IsNullOrWhiteSpace(startNote)) WriteLine(startNote);
-                WriteLine("====================================================================");
-                WriteLine();
 
-                // układ priorytetów (1 linia, numerowane)
-                if (_prio != null && _prio.Count > 0)
+                // Układ priorytetów w jednej linii
+                if (_prio.Count > 0)
                 {
-                    var priolist = _prio.Select((p, i) => $"{i + 1}. {PriName(p)}");
-                    WriteLine($"Układ priorytetów: {string.Join(", ", priolist)}");
-                    WriteLine();
+                    var items = _prio.Select((p, i) => $"{i + 1}. {GetEnumDescription(p)}").ToList();
+                    // dopisz Priorytet 5, jeśli nie ma go w liście użytkownika
+                    if (!_prio.Contains(SolverPriority.ZgodnoscWaznosciDeklaracji))
+                        items.Add("5. Zgodność z ważnością deklaracji");
+                    WriteLine($"Układ priorytetów: {string.Join(", ", items)}");
                 }
 
-                // === TABELA DEKLARACJI ===
-                WriteDeclarationsTable();
-                WriteLine();
-                WriteLine("REZ = HARD. Naruszenie REZ/URL/DYZ traktujemy jako błąd krytyczny.");
-                WriteLine("Tryb logowania: " + _mode.ToString().ToUpperInvariant());
-                WriteLine("--------------------------------------------------------------------");
-                Flush();
+                WriteLine("");
+                WriteDeklaracjeTable();
+                WriteLine("");
             }
         }
 
-        // ---------- PUBLIC API (info/trace/stop) ----------
-        public static void Info(string msg) => WriteTagged("INFO", msg, LogMode.Info);
-        public static void Debug(string msg) { if (_mode == LogMode.Debug) WriteTagged("DEBUG", msg, LogMode.Debug); }
-        public static void TraceTry(string msg) { if (_mode == LogMode.Debug) WriteTagged("TRY", msg, LogMode.Debug); }
-        public static void TraceOk(string msg) { if (_mode == LogMode.Debug) WriteTagged("OK", msg, LogMode.Debug); }
-        public static void TraceFail(string msg) { if (_mode == LogMode.Debug) WriteTagged("FAIL", msg, LogMode.Debug); }
-        public static void TraceBacktrack(string m) { if (_mode == LogMode.Debug) WriteTagged("BACKTRACK", m, LogMode.Debug); }
-        public static void TraceImprove(string m) { if (_mode == LogMode.Debug) WriteTagged("IMPROVE", m, LogMode.Debug); }
-        public static void TracePruneTT(string m) { if (_mode == LogMode.Debug) WriteTagged("PRUNE_TT", m, LogMode.Debug); }
-
-        public static void StopIfActive()
+        /// <summary>Wiadomość informacyjna (zawsze trafia do logu, jeśli logowanie włączone).</summary>
+        public static void Info(string message)
         {
             lock (Gate)
             {
-                if (!_active) return;
-                WriteLine("== StopIfActive ==");
-                Close();
+                if (!_active || !_enabled || _w is null) return;
+                WriteLine(message);
             }
         }
 
-        public static void Stop()
+        /// <summary>Wiadomość debug (tylko gdy tryb Debug).</summary>
+        public static void Debug(string message)
         {
             lock (Gate)
             {
-                if (!_active) return;
-                WriteLine();
-                WriteLine("PODSUMOWANIE PRIORYTETÓW: (brak – solver nie podał metryk końcowych)");
-                WriteLine();
-                Close();
+                if (!_active || !_enabled || _w is null) return;
+                if (_mode != LogMode.Debug) return;
+                WriteLine(message);
             }
         }
 
+        /// <summary>Znacznik poprawy (np. lepszy „best-so-far”).</summary>
+        public static void TraceImprove(string message)
+        {
+            Info($"IMPROVE: {message}");
+        }
+
+        // --- Nakładki kompatybilnościowe używane przez BacktrackingSolver ---
+        public static void TraceTry() => Debug("[TRY]");
+        public static void TraceTry(string message) => Debug($"[TRY] {message}");
+        public static void TraceTry(string format, params object[] args) =>
+            Debug("[TRY] " + string.Format(CultureInfo.InvariantCulture, format, args));
+
+        public static void TraceOk() => Info("[OK]");
+        public static void TraceOk(string message) => Info($"[OK] {message}");
+        public static void TraceOk(string format, params object[] args) =>
+            Info("[OK] " + string.Format(CultureInfo.InvariantCulture, format, args));
+
+        public static void TraceFail() => Info("[FAIL]");
+        public static void TraceFail(string message) => Info($"[FAIL] {message}");
+        public static void TraceFail(string format, params object[] args) =>
+            Info("[FAIL] " + string.Format(CultureInfo.InvariantCulture, format, args));
+        // --------------------------------------------------------------------
+
+        /// <summary>Finalizacja bieżącego przebiegu: zapisuje pełny grafik, zestawienia i podsumowanie priorytetów.</summary>
         public static void Stop(RozwiazanyGrafik wynik)
         {
             lock (Gate)
             {
-                if (!_active) return;
+                if (!_active || !_enabled || _w is null) return;
 
-                // === UTWORZONY GRAFIK (pełny) ===
-                if (wynik?.Przypisania != null && wynik.Przypisania.Count > 0)
+                try
                 {
-                    WriteLine();
-                    WriteLine("UTWORZONY GRAFIK:");
-                    foreach (var d in wynik.Przypisania.Keys.OrderBy(d => d))
-                    {
-                        var doc = wynik.Przypisania[d];
-                        var sym = doc?.Symbol ?? "---";
-                        WriteLine($"{d:dd.MM.yyyy} - {sym}");
-                    }
+                    WriteLine("");
+                    WriteLine("========== UTWORZONY GRAFIK ==========");
+                    WritePelnyGrafik(wynik);
 
-                    // Zestawienie per lekarz
-                    WriteLine();
-                    WriteLine("ZESTAWIENIE DYŻURÓW (per lekarz):");
-                    var activeDocs = _data!.Lekarze.Where(l => l.IsAktywny).OrderBy(l => l.Symbol).ToList();
-                    foreach (var l in activeDocs)
-                    {
-                        var myDays = wynik.Przypisania
-                            .Where(kv => kv.Value?.Symbol == l.Symbol)
-                            .Select(kv => kv.Key)
-                            .OrderBy(d => d)
-                            .ToList();
+                    WriteLine("");
+                    WriteLine("========== ZESTAWIENIE PER LEKARZ ==========");
+                    WritePerLekarzSummary(wynik);
 
-                        string daysStr = myDays.Count == 0
-                            ? "-"
-                            : string.Join(", ", myDays.Select(d => d.Day.ToString("00")));
+                    WriteLine("");
+                    WriteLine("========== PODSUMOWANIE PRIORYTETÓW ==========");
+                    WritePodsumowaniePriorytetow(wynik);
 
-                        var limit = _data!.LimityDyzurow.GetValueOrDefault(l.Symbol, 0);
-                        WriteLine($"{l.Symbol}: {daysStr} ({myDays.Count} / {limit})");
-                    }
+                    WriteLine("");
+                    WriteLine($"Koniec: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
                 }
-
-                // === PODSUMOWANIE PRIORYTETÓW ===
-                WriteLine();
-                WriteLine("PODSUMOWANIE PRIORYTETÓW:");
-
-                // Odczyt standardowych metryk z wyniku
-                WriteLine($"1) Ciągłość początkowa: {wynik.DlugoscCiaguPoczatkowego} dni");
-                WriteLine($"2) Obsada: {wynik.LiczbaDniObsadzonych} dni");
-                WriteLine($"3) Wskaźnik Sprawiedliwości - σ obciążeń: {wynik.WskaznikRownomiernosci:F6}  (im mniej, tym lepiej)");
-                WriteLine($"4) Wskaźnik Równomierności - rozrzut w miesiącu: {wynik.WskaznikRozlozeniaDyzurow:F6}  (im mniej, tym lepiej)");
-
-                // Zgodność z ważnością deklaracji (BCH > CHC > MOG > WAR); REZ/URL/DYZ pomijamy w ocenie
-                double zgodnosc = ObliczZgodnoscWaznosciDeklaracji(wynik);
-                WriteLine($"5) Zgodność z ważnością deklaracji: {zgodnosc:F6}  (im wyższa, tym lepiej)");
-
-                WriteLine();
-                Close();
+                finally
+                {
+                    _w.Flush();
+                    _w.Dispose();
+                    _w = null;
+                    _active = false;
+                    _in = null;
+                    _prio = Array.Empty<SolverPriority>();
+                }
             }
         }
 
-        // ---------- TABELA DEKLARACJI (nagłówek logu) ----------
-        private static void WriteDeclarationsTable()
+        // ---------------- Implementacja szczegółów ----------------
+
+        private static void WriteLine(string s)
         {
-            if (_data == null) return;
+            _w!.WriteLine(s);
+        }
 
-            var days = _data.DniWMiesiacu.OrderBy(d => d).ToList();
-            var docs = _data.Lekarze.Where(l => l.IsAktywny).OrderBy(l => l.Symbol).ToList();
-            if (docs.Count == 0 || days.Count == 0) { WriteLine("(brak danych)"); return; }
+        private static void WriteDeklaracjeTable()
+        {
+            if (_in is null) return;
 
-            // szerokość kolumn: >=5, >= len(symbol)+2
-            var colW = docs.Select(d => Math.Max(5, d.Symbol.Length + 2)).ToArray();
-            int leftW = 12;
+            var dni = _in.DniWMiesiacu;
+            var lekarze = _in.Lekarze.Where(l => l.IsAktywny).ToList();
+            var sym = lekarze.Select(l => l.Symbol).ToList();
+            int colW = Math.Max(ColWidthMin, sym.Max(s => s?.Length ?? 0));
 
-            // separator
-            string sep = new string('=', leftW + 1 + colW.Sum(w => w + 3) - 1); // przybliżony, „ładny” pasek
+            string Cell(string txt, int w) => " " + (txt ?? "").PadRight(w) + " ";
+            string LCell(string txt) => (txt ?? "").PadRight(DateColWidth);
 
-            // wiersz 1: symbole lekarzy
-            var sb = new StringBuilder();
-            sb.Append(new string(' ', leftW));
-            sb.Append(" |");
-            for (int i = 0; i < docs.Count; i++)
-                sb.Append(' ').Append(Center(docs[i].Symbol, colW[i])).Append(" |");
-            WriteLine(sb.ToString());
-            WriteLine(sep);
+            // Nagłówek kolumn
+            var header = new StringBuilder();
+            header.Append(LCell("")); header.Append("|");
+            foreach (var s in sym) { header.Append(Cell(s, colW)); header.Append("|"); }
+            WriteLine(header.ToString());
 
-            // wiersz 2: "Data/Limit:" + limity
-            sb.Clear();
-            sb.Append(Center("Data/Limit:", leftW));
-            sb.Append(" |");
-            for (int i = 0; i < docs.Count; i++)
+            // Pasek '=' (dopasowany długością do nagłówka)
+            WriteLine(new string('=', header.Length));
+
+            // Wiersz „Data/Limit” z limitami
+            var wLimit = new StringBuilder();
+            wLimit.Append(LCell("Data/Limit:")); wLimit.Append("|");
+            foreach (var l in lekarze)
             {
-                var lim = _data.LimityDyzurow.GetValueOrDefault(docs[i].Symbol, 0);
-                sb.Append(' ').Append(Center(lim.ToString(CultureInfo.InvariantCulture), colW[i])).Append(" |");
+                int lim = _in.LimityDyzurow.TryGetValue(l.Symbol, out var v) ? v : 0;
+                wLimit.Append(Cell(lim.ToString(CultureInfo.InvariantCulture), colW)); wLimit.Append("|");
             }
-            WriteLine(sb.ToString());
-            WriteLine(sep);
+            WriteLine(wLimit.ToString());
 
-            // wiersze dni
-            foreach (var day in days)
+            // Pasek '='
+            WriteLine(new string('=', header.Length));
+
+            // Każdy dzień: kody deklaracji w kolumnach
+            foreach (var d in dni)
             {
-                sb.Clear();
-                sb.Append(day.ToString("dd.MM.yyyy")).Append(new string(' ', Math.Max(0, leftW - 10)));
-                sb.Append(" |");
-                for (int i = 0; i < docs.Count; i++)
+                var row = new StringBuilder();
+                row.Append(LCell(d.ToString("dd.MM.yyyy", CultureInfo.InvariantCulture)));
+                row.Append("|");
+                foreach (var l in lekarze)
                 {
-                    var sym = docs[i].Symbol;
-                    var td = TypDostepnosci.Niedostepny;
-                    if (_data.Dostepnosc.TryGetValue(day, out var map) && map != null)
-                        map.TryGetValue(sym, out td);
-
-                    var code = CodeOf(td);
-                    sb.Append(' ').Append(Center(code, colW[i])).Append(" |");
+                    var av = _in.Dostepnosc.TryGetValue(d, out var map) && map.TryGetValue(l.Symbol, out var t)
+                        ? t : TypDostepnosci.Niedostepny;
+                    row.Append(Cell(Deklaracje.Kod(av), colW)).Append("|");
                 }
-                WriteLine(sb.ToString());
+                WriteLine(row.ToString());
             }
         }
 
-        // ---------- KODY / METRYKI POMOCNICZE ----------
-        private static string CodeOf(TypDostepnosci t) => t switch
+        private static void WritePelnyGrafik(RozwiazanyGrafik wynik)
         {
-            TypDostepnosci.Niedostepny => "---",
-            TypDostepnosci.MogeWarunkowo => "WAR",
-            TypDostepnosci.Moge => "MOG",
-            TypDostepnosci.Chce => "CHC",
-            TypDostepnosci.BardzoChce => "BCH",
-            TypDostepnosci.Rezerwacja => "REZ",
-            TypDostepnosci.DyzurInny => "DYZ",
-            TypDostepnosci.Urlop => "URL",
-            _ => "---"
-        };
+            if (_in is null) return;
+            foreach (var d in _in.DniWMiesiacu)
+            {
+                _ = wynik.Przypisania.TryGetValue(d, out var lek);
+                string who = lek?.Symbol ?? "---";
+                WriteLine($"{d:dd.MM.yyyy} - {who}");
+            }
+        }
 
-        private static string PriName(SolverPriority p) => p switch
+        private static void WritePerLekarzSummary(RozwiazanyGrafik wynik)
         {
-            SolverPriority.CiagloscPoczatkowa => "Ciągłość obsady",
-            SolverPriority.LacznaLiczbaObsadzonychDni => "Obsada (łączna)",
-            SolverPriority.SprawiedliwoscObciazenia => "Sprawiedliwość (σ obciążeń)",
-            SolverPriority.RownomiernoscRozlozenia => "Równomierność (czasowa)",
-            SolverPriority.ZgodnoscWaznosciDeklaracji => "Zgodność z ważnością deklaracji",
-            _ => p.ToString()
-        };
+            if (_in is null) return;
 
-        // Normalizowana [0..1]: liczymy tylko miękkie deklaracje (BCH/CHC/MOG/WAR),
-        // REZ/URL/DYZ pomijamy w ocenie. 1.0 = same BCH.
-        private static double ObliczZgodnoscWaznosciDeklaracji(RozwiazanyGrafik wynik)
-        {
-            if (_data == null || wynik?.Przypisania == null || wynik.Przypisania.Count == 0) return 0.0;
-            double sum = 0;
-            int cnt = 0;
-
+            // Przygotuj listy dat per lekarz
+            var per = _in.Lekarze.Where(l => l.IsAktywny).ToDictionary(l => l.Symbol, _ => new List<DateTime>());
             foreach (var kv in wynik.Przypisania)
             {
-                var date = kv.Key;
-                var doc = kv.Value;
-                if (doc == null) continue;
+                if (kv.Value != null && per.TryGetValue(kv.Value.Symbol, out var list))
+                    list.Add(kv.Key);
+            }
 
-                if (!_data.Dostepnosc.TryGetValue(date, out var map) || map == null) continue;
-                if (!map.TryGetValue(doc.Symbol, out var td)) continue;
+            // Wypisz
+            foreach (var l in _in.Lekarze.Where(l => l.IsAktywny))
+            {
+                per.TryGetValue(l.Symbol, out var lista);
+                lista ??= new List<DateTime>();
+                lista.Sort();
 
-                int w = td switch
+                int lim = _in.LimityDyzurow.TryGetValue(l.Symbol, out var v) ? v : 0;
+
+                string daty = lista.Count == 0
+                    ? "-"
+                    : string.Join(", ", lista.Select(d => d.Day.ToString("00", CultureInfo.InvariantCulture)));
+
+                WriteLine($"{l.Symbol}: {daty} ({lista.Count} / {lim})");
+            }
+        }
+
+        private static void WritePodsumowaniePriorytetow(RozwiazanyGrafik m)
+        {
+            bool seenZgodnosc = false;
+
+            // Kolejność raportowania = kolejność priorytetów ustawiona przez użytkownika
+            foreach (var p in _prio)
+            {
+                switch (p)
                 {
-                    TypDostepnosci.BardzoChce => 4,
-                    TypDostepnosci.Chce => 3,
-                    TypDostepnosci.Moge => 2,
-                    TypDostepnosci.MogeWarunkowo => 1,
-                    _ => 0 // REZ/URL/DYZ/--- nie liczymy do zgodności
-                };
-                if (w > 0) { sum += w; cnt++; }
+                    case SolverPriority.CiagloscPoczatkowa:
+                        WriteLine($"Priorytet {IndexOf(_prio, p)} (Ciągłość początkowa): {m.DlugoscCiaguPoczatkowego} dni");
+                        break;
+
+                    case SolverPriority.LacznaLiczbaObsadzonychDni:
+                        WriteLine($"Priorytet {IndexOf(_prio, p)} (Obsada): {m.LiczbaDniObsadzonych} dni");
+                        break;
+
+                    case SolverPriority.SprawiedliwoscObciazenia:
+                        // poprawne pole: WskaznikSprawiedliwosci
+                        WriteLine($"Priorytet {IndexOf(_prio, p)} (Wskaźnik Sprawiedliwości - σ obciążeń): {m.WskaznikSprawiedliwosci:F6}  (im mniej, tym lepiej)");
+                        break;
+
+                    case SolverPriority.RownomiernoscRozlozenia:
+                        // poprawne pole: WskaznikRownomiernosci
+                        WriteLine($"Priorytet {IndexOf(_prio, p)} (Wskaźnik Równomierności - rozrzut w miesiącu): {m.WskaznikRownomiernosci:F6}  (im mniej, tym lepiej)");
+                        break;
+
+                    case SolverPriority.ZgodnoscWaznosciDeklaracji:
+                        double zgod = ObliczZgodnoscWaznosciDeklaracji(m);
+                        WriteLine($"Priorytet {IndexOf(_prio, p)} (Zgodność z ważnością deklaracji): {zgod:F6}  (im wyższa, tym lepiej)");
+                        seenZgodnosc = true;
+                        break;
+                }
             }
 
-            if (cnt == 0) return 0.0;
-            return sum / (4.0 * cnt);
-        }
-
-        private static string Center(string s, int w)
-        {
-            if (s == null) s = "";
-            if (s.Length >= w) return s;
-            int pad = w - s.Length;
-            int left = pad / 2;
-            int right = pad - left;
-            return new string(' ', left) + s + new string(' ', right);
-        }
-
-        // ---------- IO ----------
-        private static void WriteTagged(string tag, string msg, LogMode lvl)
-        {
-            lock (Gate)
+            // Jeśli użytkownik nie umieścił „Zgodności...” w swojej liście, wypisz ją jako stały Priorytet 5
+            if (!seenZgodnosc)
             {
-                if (!_active || !_enabled) return;
-                var ts = DateTime.Now.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture);
-                _w!.WriteLine($"[{ts}] [{_solver}] [{tag}] {msg}");
-                Flush();
+                double zgod = ObliczZgodnoscWaznosciDeklaracji(m);
+                WriteLine($"Priorytet 5 (Zgodność z ważnością deklaracji): {zgod:F6}  (im wyższa, tym lepiej)");
             }
         }
-        private static void WriteLine(string s = "")
+
+        // Uwaga: IReadOnlyList<T> nie ma wbudowanego IndexOf – własna implementacja + 1-bazowe raportowanie
+        private static int IndexOf(IReadOnlyList<SolverPriority> list, SolverPriority p)
         {
-            lock (Gate)
+            int idx = IndexOfRO(list, p);
+            return 1 + Math.Max(0, idx);
+        }
+
+        private static int IndexOfRO<T>(IReadOnlyList<T> list, T value)
+        {
+            var cmp = EqualityComparer<T>.Default;
+            for (int i = 0; i < list.Count; i++)
+                if (cmp.Equals(list[i], value))
+                    return i;
+            return -1;
+        }
+
+        private static double ObliczZgodnoscWaznosciDeklaracji(RozwiazanyGrafik wynik)
+        {
+            // Definicja: średnia ważona preferencji / (max 3) znormalizowana do [0..1], liczona względem wszystkich dni w miesiącu.
+            // Punktacja: BCH=3, CHC=2, MOG=1, WAR=0; REZ/URL/DYZ/--- są pomijane w liczniku.
+            if (_in is null) return 0.0;
+
+            double sum = 0.0;
+            foreach (var d in _in.DniWMiesiacu)
             {
-                if (!_active || !_enabled) return;
-                _w!.WriteLine(s);
+                if (!wynik.Przypisania.TryGetValue(d, out var lek) || lek is null) continue;
+                if (!_in.Dostepnosc.TryGetValue(d, out var map) || !map.TryGetValue(lek.Symbol, out var t)) continue;
+
+                int w = Deklaracje.WagaPreferencji(t);
+                if (w > 0) sum += w; // tylko preferencje liczymy
             }
+
+            double denom = 3.0 * Math.Max(1, _in.DniWMiesiacu.Count);
+            return sum / denom;
         }
-        private static void Flush() { try { _w?.Flush(); } catch { } }
-        private static void Close()
+
+        // --- pomoc: opisy enumów ---
+        private static string GetEnumDescription(Enum value)
         {
-            var t1 = DateTime.Now;
-            WriteLine();
-            WriteLine($"Stop: {t1:yyyy-MM-dd HH:mm:ss}  (czas: {(t1 - _t0).TotalSeconds:F3}s)");
-            WriteLine("====================================================================");
-            try { _w!.Flush(); _w!.Dispose(); } catch { }
-            _w = null; _active = false;
+            var fi = value.GetType().GetField(value.ToString());
+            if (fi != null)
+            {
+                var attr = fi.GetCustomAttributes(typeof(DescriptionAttribute), false).FirstOrDefault() as DescriptionAttribute;
+                if (attr != null && !string.IsNullOrWhiteSpace(attr.Description)) return attr.Description!;
+            }
+            // fallback
+            return value.ToString();
         }
     }
 }

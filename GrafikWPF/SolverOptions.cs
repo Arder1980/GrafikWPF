@@ -16,6 +16,6 @@
         public int TimeBudgetSeconds { get; init; } = 60;
 
         // Beam (opcjonalnie)
-        public int? BeamWidth { get; init; } = null;
+        public int? BeamWidth { get; set; }
     }
 }

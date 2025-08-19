@@ -43,9 +43,9 @@
             // uproszczona, ale deterministyczna kolejność ważna dla seeda
             if (x.LiczbaDniObsadzonych != y.LiczbaDniObsadzonych) return x.LiczbaDniObsadzonych > y.LiczbaDniObsadzonych;
             if (x.DlugoscCiaguPoczatkowego != y.DlugoscCiaguPoczatkowego) return x.DlugoscCiaguPoczatkowego > y.DlugoscCiaguPoczatkowego;
-            var xf = 1.0 / (1.0 + x.WskaznikRownomiernosci); var yf = 1.0 / (1.0 + y.WskaznikRownomiernosci);
+            var xf = 1.0 / (1.0 + x.WskaznikSprawiedliwosci); var yf = 1.0 / (1.0 + y.WskaznikSprawiedliwosci);
             if (xf != yf) return xf > yf;
-            var xr = 1.0 / (1.0 + x.WskaznikRozlozeniaDyzurow); var yr = 1.0 / (1.0 + y.WskaznikRozlozeniaDyzurow);
+            var xr = 1.0 / (1.0 + x.WskaznikRownomiernosci); var yr = 1.0 / (1.0 + y.WskaznikRownomiernosci);
             if (xr != yr) return xr > yr;
             if (x.ZrealizowaneBardzoChce != y.ZrealizowaneBardzoChce) return x.ZrealizowaneBardzoChce > y.ZrealizowaneBardzoChce;
             if (x.ZrealizowaneChce != y.ZrealizowaneChce) return x.ZrealizowaneChce > y.ZrealizowaneChce;

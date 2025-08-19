@@ -279,8 +279,6 @@ namespace GrafikWPF
 
         private static void WritePodsumowaniePriorytetow(RozwiazanyGrafik m)
         {
-            bool seenZgodnosc = false;
-
             // Kolejność raportowania = kolejność priorytetów ustawiona przez użytkownika
             foreach (var p in _prio)
             {
@@ -295,28 +293,20 @@ namespace GrafikWPF
                         break;
 
                     case SolverPriority.SprawiedliwoscObciazenia:
-                        // poprawne pole: WskaznikSprawiedliwosci
+                        // teraz poprawne pole: WskaznikSprawiedliwosci
                         WriteLine($"Priorytet {IndexOf(_prio, p)} (Wskaźnik Sprawiedliwości - σ obciążeń): {m.WskaznikSprawiedliwosci:F6}  (im mniej, tym lepiej)");
                         break;
 
                     case SolverPriority.RownomiernoscRozlozenia:
-                        // poprawne pole: WskaznikRownomiernosci
+                        // teraz poprawne pole: WskaznikRownomiernosci
                         WriteLine($"Priorytet {IndexOf(_prio, p)} (Wskaźnik Równomierności - rozrzut w miesiącu): {m.WskaznikRownomiernosci:F6}  (im mniej, tym lepiej)");
                         break;
 
                     case SolverPriority.ZgodnoscWaznosciDeklaracji:
-                        double zgod = ObliczZgodnoscWaznosciDeklaracji(m);
-                        WriteLine($"Priorytet {IndexOf(_prio, p)} (Zgodność z ważnością deklaracji): {zgod:F6}  (im wyższa, tym lepiej)");
-                        seenZgodnosc = true;
+                        double zgodnosc = ObliczZgodnoscWaznosciDeklaracji(m);
+                        WriteLine($"Priorytet {IndexOf(_prio, p)} (Zgodność z ważnością deklaracji): {zgodnosc:F6}  (im wyższa, tym lepiej)");
                         break;
                 }
-            }
-
-            // Jeśli użytkownik nie umieścił „Zgodności...” w swojej liście, wypisz ją jako stały Priorytet 5
-            if (!seenZgodnosc)
-            {
-                double zgod = ObliczZgodnoscWaznosciDeklaracji(m);
-                WriteLine($"Priorytet 5 (Zgodność z ważnością deklaracji): {zgod:F6}  (im wyższa, tym lepiej)");
             }
         }
 

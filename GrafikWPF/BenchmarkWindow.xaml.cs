@@ -152,7 +152,7 @@ namespace GrafikWPF
 
                 if (optimalStandard != null)
                 {
-                    // Używamy nowej, ujednoliconej usługi do oceny wzorca
+                    // Ujednolicona ocena wzorca
                     optimalScore = EvaluationAndScoringService.CalculateScore(optimalStandard, selectedPriorities, testData);
                 }
 
@@ -189,7 +189,7 @@ namespace GrafikWPF
 
                     if (solverResult != null && solverResult.Przypisania.Any() && optimalStandard != null && optimalScore > 0)
                     {
-                        // Używamy nowej, ujednoliconej usługi do oceny wyniku solvera
+                        // Spójna ocena wyniku solvera
                         double solverScore = EvaluationAndScoringService.CalculateScore(solverResult, selectedPriorities, testData);
                         double quality = (solverScore / optimalScore) * 100.0;
                         result.QualityScore = $"{quality:F2}%";
@@ -241,8 +241,9 @@ namespace GrafikWPF
             if (standard == null) return;
             var utility = new SolverUtility(testData);
 
+            // Liczymy metryki jawnie na potrzeby logu, żeby nazwy i wartości były spójne
             var standardMetrics = EvaluationAndScoringService.CalculateMetrics(standard.Przypisania, utility.ObliczOblozenie(standard.Przypisania), testData);
-            var solverMetrics = solverResult; // solverResult to już obiekt z pełnymi metrykami
+            var solverMetrics = EvaluationAndScoringService.CalculateMetrics(solverResult.Przypisania, utility.ObliczOblozenie(solverResult.Przypisania), testData);
 
             var sb = new StringBuilder();
             sb.AppendLine("===============================================================");
@@ -253,8 +254,8 @@ namespace GrafikWPF
             sb.AppendLine($"Optimal Score: {optimalScore:F4}");
             sb.AppendLine($"DlugoscCiaguPoczatkowego: {standardMetrics.DlugoscCiaguPoczatkowego}");
             sb.AppendLine($"LiczbaDniObsadzonych: {standardMetrics.LiczbaDniObsadzonych}");
+            sb.AppendLine($"WskaznikSprawiedliwosci: {standardMetrics.WskaznikSprawiedliwosci:F10}");
             sb.AppendLine($"WskaznikRownomiernosci: {standardMetrics.WskaznikRownomiernosci:F10}");
-            sb.AppendLine($"WskaznikRozlozeniaDyzurow: {standardMetrics.WskaznikRozlozeniaDyzurow:F10}");
             sb.AppendLine($"ZrealizowaneBardzoChce: {standardMetrics.ZrealizowaneBardzoChce}");
             sb.AppendLine($"ZrealizowaneChce: {standardMetrics.ZrealizowaneChce}");
             sb.AppendLine($"ZrealizowaneMoge: {standardMetrics.ZrealizowaneMoge}");
@@ -263,8 +264,8 @@ namespace GrafikWPF
             sb.AppendLine($"Solver Score: {solverScore:F4}");
             sb.AppendLine($"DlugoscCiaguPoczatkowego: {solverMetrics.DlugoscCiaguPoczatkowego}");
             sb.AppendLine($"LiczbaDniObsadzonych: {solverMetrics.LiczbaDniObsadzonych}");
+            sb.AppendLine($"WskaznikSprawiedliwosci: {solverMetrics.WskaznikSprawiedliwosci:F10}");
             sb.AppendLine($"WskaznikRownomiernosci: {solverMetrics.WskaznikRownomiernosci:F10}");
-            sb.AppendLine($"WskaznikRozlozeniaDyzurow: {solverMetrics.WskaznikRozlozeniaDyzurow:F10}");
             sb.AppendLine($"ZrealizowaneBardzoChce: {solverMetrics.ZrealizowaneBardzoChce}");
             sb.AppendLine($"ZrealizowaneChce: {solverMetrics.ZrealizowaneChce}");
             sb.AppendLine($"ZrealizowaneMoge: {solverMetrics.ZrealizowaneMoge}");

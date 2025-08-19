@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PendingCommit>
-  <CommitComment>W trakcie naprawy rownomierności/sprawiedliwosci</CommitComment>
+  <CommitComment>Po ustawieniu metryk 'sprawiedliwosci' i 'rownomiernosci'</CommitComment>
   <PinnedBranches />
   <PublishPrompt Enabled="True" />
   <ActiveAccountPrompt Enabled="True" />
